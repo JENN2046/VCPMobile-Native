@@ -13,7 +13,7 @@ class BridgeContractTest {
         }
     }
 
-    @Test fun successAndOrderedCallbacks() = runBlocking {
+    @Test fun successAndOrderedCallbacks(): Unit = runBlocking {
         val probe = BridgeProbe()
         try {
             val listener = Recorder()
@@ -24,7 +24,7 @@ class BridgeContractTest {
         } finally { probe.destroy() }
     }
 
-    @Test fun structuredFailureCrossesBinding() = runBlocking {
+    @Test fun structuredFailureCrossesBinding(): Unit = runBlocking {
         val probe = BridgeProbe()
         try {
             val error = assertFails {
@@ -34,7 +34,7 @@ class BridgeContractTest {
         } finally { probe.destroy() }
     }
 
-    @Test fun reentrantCancellationCrossesBinding() = runBlocking {
+    @Test fun reentrantCancellationCrossesBinding(): Unit = runBlocking {
         val probe = BridgeProbe()
         try {
             val listener = Recorder { probe.cancel() }
@@ -44,7 +44,7 @@ class BridgeContractTest {
         } finally { probe.destroy() }
     }
 
-    @Test fun oneShotLifecycleIsEnforced() = runBlocking {
+    @Test fun oneShotLifecycleIsEnforced(): Unit = runBlocking {
         val probe = BridgeProbe()
         try {
             probe.run(ProbeRequest("first", 1u, 0u), Recorder())

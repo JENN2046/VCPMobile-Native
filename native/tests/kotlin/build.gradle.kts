@@ -13,5 +13,8 @@ kotlin {
 }
 tasks.test {
     systemProperty("jna.library.path", file("../../target/release").absolutePath)
-    testLogging { events("passed", "skipped", "failed") }
+    testLogging {
+        events("passed", "skipped", "failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
