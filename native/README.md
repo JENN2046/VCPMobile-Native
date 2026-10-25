@@ -1,27 +1,28 @@
-# VCPMobile Native: M0/M1 start
+# VCPMobile Native client development
 
-这是独立的 Swift/Kotlin ↔ Rust 桥接验证工程，**不是 NativeSync 实现或可安装 App**。旧 `src-tauri/`、Vue 客户端、现有 CI/release 配置不变。
+Independent SwiftUI / Jetpack Compose applications share a Rust client core through generated UniFFI bindings. Current screens are labelled **M1 diagnostics**, not a connected chat client. Existing Tauri/Vue code, server, main branch and history remain unchanged.
 
-## 已编写的内容
+## Building blocks
 
-- Rust 共享库：有界输入、结构化错误、有序进度回调、异步等待、可重入取消、单次运行生命周期。
-- 12 个 Rust 契约测试；生成真实 UniFFI Swift/Kotlin 绑定。
-- Swift/macOS 和 Kotlin/JVM 直接调用 Rust 动态库的合同测试，不用假实现。
-- Android arm64 与 iOS device/simulator Rust 目标交叉编译入口。
-- 无网络业务调用、无真实用户数据、无凭据、无付费模型、无后台任务调度器。
+- `core/src/lib.rs`: actual Rust structured errors, ordered callbacks, asynchronous wait, cancellation and single-run lifecycle. The original 12 tests remain.
+- `core/src/pending.rs`: bounded SQLite original submissions, transactional persistence/cleanup and cross-session query-only decisions. Fourteen new contract tests; actual results tracked in STATUS.md.
+- `apps/android`: Compose host, generated Kotlin binding, packaged Rust library and four emulator UI tests.
+- `apps/ios`: SwiftUI/XcodeGen host, generated Swift binding and three simulator UI tests.
+- `tests/kotlin` / `tests/swift`: actual host-to-Rust tests, not replacements for simulator or device tests.
 
-## 本地命令
+No NativeSync transport is invented. Exact accepted service source is still needed. The pending component has no server acceptance or task execution authority.
 
-在具有 Rust/rustup 的 Linux/macOS 环境执行 `bash native/scripts/check.sh`。Kotlin 测试使用 Java 17 和 Gradle 8.11.1：`gradle -p native/tests/kotlin --no-daemon test`。macOS 执行 `bash native/tests/swift/run.sh`。
+## Build
 
-`ProbeListener` 回调不是 UI 主线程保证；后续 SwiftUI/Compose 必须正确切回各自 UI 上下文。`cancel()` 只取消本地探针，不取消服务端 AA。每次运行建立新对象；失效对象不能重用。
+Run `bash native/scripts/check.sh` with Rust/rustup on Linux/macOS. It uses `--locked` when a lockfile exists. CI retains generated lockfiles for verification; dependency additions without a resolved committed lock remain provisional.
 
-## 验证层级
+- Kotlin: Java 17 + Gradle 8.11.1, `gradle -p native/tests/kotlin --no-daemon test`.
+- Swift/macOS: `bash native/tests/swift/run.sh`.
+- Android: `bash native/scripts/build-android.sh`, then `gradle -p native/apps/android --no-daemon :app:connectedDebugAndroidTest` with an isolated emulator.
+- iOS: on macOS/Xcode/XcodeGen, `bash native/scripts/test-ios.sh`; actual simulator app, not signed iPhone distribution.
 
-Rust 测试、FFI 宿主测试、移动目标编译、SwiftUI/Compose App 编译、模拟器、真机分别记账。此探针即使全部通过，也不能把 M1 标为全部完成，更不能声称 NativeSync R2.1 已接通。
+App/bundle ID `org.vcptoolbox.nativeclient.dev` is separate from the old app. The diagnostic requests no network/microphone permission and does not dispatch models/tasks. Callbacks are marshalled to the UI thread; storage work belongs off that thread.
 
-首次依赖解析将打印 Cargo.lock；锁文件在准确结果取得后提交。当前固定直接依赖和 Rust 版本，尚不能宣称传递依赖已完全锁定。
+## Evidence
 
-## 后续入口
-
-先补 Compose/SwiftUI 宿主并在各自模拟器调用同一库；同时取得 NativeSync 已接受源码，之后才开展协议适配。准确进度和阻碍见 `STATUS.md`。继承仓库已有 LICENSE，不改变许可或上游署名。
+Read STATUS.md and WORKLOG.md first. Source, host tests, target compilation, app compilation, simulator tests and device acceptance are distinct. An APK does not by itself establish M3 or M5. Preserve failed evidence, source identities and original repository LICENSE/attribution.

@@ -4,6 +4,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -81,14 +83,14 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ProbeScreen(model: ProbeViewModel = viewModel()) {
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Column(Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("VCP 原生开发版", style = MaterialTheme.typography.headlineMedium)
         Text("M1 · 共享核心验证", style = MaterialTheme.typography.titleMedium)
         Text("这是工程验证界面，不是已接通服务的聊天客户端。")
         Text(coreInfo(), style = MaterialTheme.typography.bodySmall)
         Text(model.status, Modifier.testTag("status"), style = MaterialTheme.typography.titleLarge)
         Text("进度：${model.progress}", Modifier.testTag("progress"))
-        Text(model.detail)
+        Text(model.detail, Modifier.testTag("detail"))
         Button(onClick = { model.start("success") }, enabled = !model.running, modifier = Modifier.testTag("success")) { Text("运行成功路径") }
         Button(onClick = { model.start("invalid") }, enabled = !model.running, modifier = Modifier.testTag("invalid")) { Text("验证错误返回") }
         Button(onClick = { model.start("slow") }, enabled = !model.running, modifier = Modifier.testTag("slow")) { Text("运行可取消路径") }

@@ -1,18 +1,29 @@
 # Native implementation work log
 
-## Scope authorized in current conversation
-Continue the existing R1.1 M0–M5 scope without asking at each milestone. Keep changes on `codex/native-rust-m0-m1`; do not modify main, production, real history, signing credentials or release settings. Standard hosted CI only. No inference of unattended code execution after the conversation ends.
+## Authorized scope
 
-## First run: 40216459025
-- Rust: 12 contract tests passed. Linux and macOS core checks and binding generation passed.
-- Swift host integration passed. iOS device/simulator Rust library compilation passed. This was not an iOS app test.
-- Kotlin: compiled, but JUnit reported `InvalidTestClassError`; the expression-bodied one-shot test inferred a Throwable return instead of void. All test entry points now explicitly return Unit. No tests removed.
-- Android target compilation was skipped after the Kotlin test failure, not passed.
+Continue agreed R1.1 M0–M5 without asking at each milestone. Only development branch/native files and its workflow; no main/PR/merge/release, production/history/account/signing changes or paid models. Original Tauri untouched.
+
+## First run 40216459025
+
+Commit `64d66cad618c7338cd07c5ccbcf49f1f5b4641e6`: Rust 12 contracts, Swift-host and Apple-target library compilation passed. Kotlin compiled but JUnit initialization rejected the expression-bodied test with a non-Unit return. Android target was skipped, not passed. Next revision explicitly returned Unit from all test entry points, preserving all tests.
+
+## App-host run 40221085134
+
+Commit `7c2977f1105aa961922c1b3312a56e69eeb3faa0` added actual isolated Compose/SwiftUI hosts and UI automation. Kotlin/JVM 4/4 passed; Android libraries/APK compiled; Android emulator UI 3/4 passed. Cancellation timed out at final CANCELLED expectation. iOS arm64 26.5 simulator 3/3 passed, no skips/expected failures; not real iPhone evidence.
+
+Retrieved Android artifact ID12609685925 SHA256 `abbfcb16c63b16f1eac970461ce115d39a3371676aec3761c336477b3e4a2787`; iOS ID12609419777 SHA256 `c09765f2a054b3d3b1cceec91917ef87bc4bea4a76f89e5264c625df9733013e`. Generated locks matched byte-for-byte for the prior dependency set. Original failure XML retained.
 
 ## This revision
-Adds actual isolated Compose and SwiftUI application hosts, UI automation, mobile library build scripts and full test failure output. Both apps clearly identify the diagnostic-only state. They request no network/microphone privileges and do not pretend that NativeSync is connected.
 
-## NativeSync source gate
-The exact accepted ToolBox commit `a9521bc32c1fb427d89ce6dcc0471c999202375f` still returns 404 via the current GitHub connection. A search of available Project/Library material did not locate the accepted source archive. The reachable older branch is reference-only, not the R2.1 acceptance baseline. ProjectForge still exposes no exact action fields/epoch constant; no guessed dispatch or alternate remote mutation was attempted.
+The diagnostic used a fixed non-scrollable Column on a 320x640 emulator. Make it scrollable, scroll controls into view before physical clicks and show the synthetic semantic tree on expectation failure. Layout correction is implemented; causal sufficiency remains subject to rerun. No tests deleted or relaxed.
 
-M0 remains partial. M1 app validation is pending its actual CI result. M2–M5 must not be marked complete from these diagnostics.
+Added local pending-submission SQLite and 14 tests: original bytes/identity, namespace, exact cleanup, capacity, corruption, concurrency, cross-session query-only recovery and a child process exiting after commit. It sends no requests, stores no credentials by design and does not claim NativeSync R2.1 compatibility. Added explicit NDK C compiler/archiver target variables for SQLite compilation.
+
+## Exact source dependency
+
+ToolBox accepted commit `a9521bc32c1fb427d89ce6dcc0471c999202375f` still returned404. Project/Library lookup did not locate its archive. Old remote sources are reference-only. ProjectForge schema did not expose exact actions/epoch, so no guessed dispatch or RemoteDesktop bypass occurred. M0 source acquisition remains partial.
+
+## Continued execution
+
+The user extended implementation authorization through M5. Hourly external continuation checks live branch/CI and performs bounded available work. Waiting CI does not justify repeated cancellation or stopping the schedule. Only new real blockers or milestones should notify the owner. Real-device/signing/source requirements remain explicit; no background completion guarantee is inferred.

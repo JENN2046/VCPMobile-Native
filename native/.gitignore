@@ -3,3 +3,7 @@
 /tests/kotlin/.gradle/
 /tests/kotlin/build/
 *.dSYM/
+apps/android/.gradle/
+apps/android/**/build/
+apps/android/local.properties
+apps/ios/*.xcodeproj/

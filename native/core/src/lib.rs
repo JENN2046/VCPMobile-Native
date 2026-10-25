@@ -1,5 +1,6 @@
-//! Isolated M1 bridge probe. It is NOT a NativeSync client or a chat simulator.
-//! No network, filesystem, credentials, model calls, or production mutations.
+//! Shared client building blocks. BridgeProbe is an isolated M1 diagnostic;
+//! pending is bounded local storage. Neither module dispatches network requests,
+//! calls models, accesses credentials, or claims NativeSync server acceptance.
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -8,6 +9,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 uniffi::setup_scaffolding!();
+
+pub mod pending;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum ProbeError {
@@ -23,7 +26,6 @@ pub enum ProbeError {
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for ProbeError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        // Do not leak arbitrary foreign exception text into shared diagnostics.
         Self::ListenerFailed
     }
 }
@@ -80,7 +82,6 @@ impl BridgeProbe {
     /// The flag is monotonic; use a fresh object for a new run.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
-        // There is at most one run. notify_one retains a permit if not yet awaited.
         self.wake.notify_one();
     }
 
