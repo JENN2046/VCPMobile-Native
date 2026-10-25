@@ -24,3 +24,8 @@ M3–M5 not complete. UI remains explicitly diagnostic. Real source, host tests,
 Hourly task reads live HEAD/CI before each bounded code batch. In-progress CI means defer rather than cancel or disable. Workflow no longer cancels an active run when a new commit arrives. Standard public-repo runners only; no cache/account/billing/secret changes; synthetic artifacts retain1day. Packaging is a checkpoint, not M5 acceptance.
 
 Next: consume actual CI, fix real failures, retrieve and commit the newly resolved lock, assemble exact portal/auth contract using the recovered materials, then implement and verify real NativeSync transport. No fabricated endpoint, auto-resubmission, second execution authority or private archive publication.
+
+
+## 2026-10-26 continuation candidate (not yet its own CI PASS)
+
+Latest acf7e43 run40223285525: iOS SUCCESS (simulator 3/3), Ubuntu Rust bridge12/pending14/recovery6, Kotlin4, Android libraries/APK PASS; Android emulator completed 1/4 then stalled until job cancellation (overall CANCELLED). This revision adds atomic per-entry/Topic pending admission with seven new tests, and an 8-minute emulator bound + capped synthetic logcat on failure. Check this revision's actual CI before acceptance. Cargo.lock from acf7e43 artifacts was recovered and hash matched dc22b3703ebcffcfeb571842785832dab913609cb9fee0af37d658a67fac3a10, but not yet checked into this revision; --locked currently uses a generated lock. No production or real-device changes. M0 partial, M1 Android pending, M2 local component in progress, M3–M5 not complete.

@@ -13,3 +13,7 @@ This is a local building block, not a NativeSync transport. It does not claim R2
 - Run synchronous disk operations off the UI thread. No credential field or network mechanism is included. Caller remains responsible for keeping credentials out of payloads and diagnostics.
 
 Fourteen tests cover raw-byte idempotence, changed identity payload rejection, namespace isolation, reopen recovery, cross-session query-only decisions, exact cleanup, count/UTF-8 byte limits, malformed input, unrelated/future databases, concurrent connections, retained corrupt records, missing paths and a real child process exiting after commit without connection destruction. Physical power loss, true HTTP ACK loss and complete NativeSync compatibility require separate actual evidence. Tests written are not tests passed; see the exact CI revision.
+
+## Exclusive application admission
+
+Raw prepare remains the low-level journal API, **not** the dispatch gate. Application sends must use prepare_topic_exclusive, which atomically rejects a second unresolved submission for one (entry, Topic) across any session or kind, retains exactly idempotent originals, and keeps ambiguous old records intact. No server request is made or authorized by local admission. Physical fault, HTTP ACK loss, live authentication and real recovery remain unverified until isolated integration.

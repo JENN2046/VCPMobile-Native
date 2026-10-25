@@ -23,3 +23,8 @@ Ran exact accepted client submissionRecovery.js under Node22.16.0 to generate50 
 Core script always uses --locked after generating a missing lock. Local synthetic shell tests checked existing/missing lock and propagated test failure. Tracked-source packaging excludes untracked data; optional resolved lock is marked separately; modified tracked lock is refused. Source archive/hash/manifest and bounded synthetic core logs join1day CI artifacts. This is not real local Rust compilation or M5 completion.
 
 Hourly continuation is active; it reads live records and advances bounded safe code work. Source lookup is no longer an all-work blocker. Device/signing requirements stay explicit; no guaranteed unattended daemon is implied.
+
+
+## 2026-10-26 live run and M2 admission
+
+Read acf7e4300f5c457867b2279de7d26d9373565a57 run40223285525: iOS simulator 3/3 PASS; Rust bridge12/pending14/recovery6 PASS; Kotlin4/4 and Android APK PASS; Android UI 1/4 only before 35-minute cancellation, so the overall run is CANCELLED. Cargo.lock artifact SHA256 dc22b3703ebcffcfeb571842785832dab913609cb9fee0af37d658a67fac3a10 matches resolved-dependencies/Cargo.lock; lock commit remains an explicit next action. This batch adds transactional per-entry/Topic admission tests, preserving unknown across sessions and kinds. No network authentication or model calls. Eight-minute emulator diagnostic bound does not delete/relax tests. Read next CI and fix its actual outcome.

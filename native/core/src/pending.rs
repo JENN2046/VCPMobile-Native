@@ -21,6 +21,8 @@ pub enum StoreError {
     UnsupportedSchema,
     #[error("pending identity or original payload does not match")]
     IdentityConflict,
+    #[error("entry and Topic already have an unresolved submission")]
+    TopicPending,
     #[error("pending storage capacity reached; no request may be sent")]
     Capacity,
     #[error("pending request not found")]
@@ -157,6 +159,48 @@ impl PendingStore {
         if saved.submission != *submission {
             return Err(StoreError::Corrupt);
         }
+        tx.commit()?;
+        Ok(saved)
+    }
+
+
+    /// Application dispatch admission, distinct from low-level prepare().
+    /// Reserve at most one unresolved request per (entry, Topic), including
+    /// earlier sessions and invitation requests. Must happen before any POST.
+    /// IMMEDIATE serializes admission across independent SQLite connections.
+    pub fn prepare_topic_exclusive(&self, submission: &Submission) -> Result<PendingRecord, StoreError> {
+        validate(submission)?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (count, same): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN session_marker=?3 AND request_id=?4 THEN 1 ELSE 0 END), 0) FROM pending_submission WHERE endpoint_id=?1 AND topic_id=?2",
+            params![submission.key.endpoint_id, submission.topic_id, submission.key.session_marker, submission.key.request_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        // Existing ambiguous duplicates are retained and block new admission.
+        if count > 1 || (count == 1 && same != 1) {
+            return Err(StoreError::TopicPending);
+        }
+        if let Some(original) = read_one(&tx, &submission.key)? {
+            if original.submission != *submission {
+                return Err(StoreError::IdentityConflict);
+            }
+            tx.commit()?;
+            return Ok(original);
+        }
+        let (rows, bytes): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(payload_json AS BLOB))),0) FROM pending_submission",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        )?;
+        if rows >= MAX_RECORDS as i64 || bytes + submission.payload_json.len() as i64 > MAX_PAYLOAD_BYTES as i64 {
+            return Err(StoreError::Capacity);
+        }
+        tx.execute(
+            "INSERT INTO pending_submission VALUES (?1,?2,?3,?4,?5,?6,'prepared')",
+            params![submission.key.endpoint_id, submission.key.session_marker, submission.key.request_id, submission.topic_id, kind_name(&submission.kind), submission.payload_json],
+        )?;
+        let saved = read_one(&tx, &submission.key)?.ok_or(StoreError::Corrupt)?;
+        if saved.submission != *submission { return Err(StoreError::Corrupt); }
         tx.commit()?;
         Ok(saved)
     }
