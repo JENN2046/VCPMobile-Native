@@ -17,6 +17,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.vcptoolbox.nativecore.*
 
 class ProbeViewModel : ViewModel() {
@@ -49,7 +50,9 @@ class ProbeViewModel : ViewModel() {
         }
         viewModelScope.launch {
             try {
-                val result = probe.run(request, listener)
+                // FFI future execution stays off the Android UI dispatcher.
+                // Updates below resume on the ViewModel's Main coroutine.
+                val result = withContext(Dispatchers.Default) { probe.run(request, listener) }
                 if (generation == ticket) {
                     progress = result.completed
                     status = "SUCCESS"

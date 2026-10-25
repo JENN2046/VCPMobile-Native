@@ -10,7 +10,7 @@ Independent SwiftUI / Jetpack Compose applications share a Rust client core thro
 - `apps/ios`: SwiftUI/XcodeGen host, generated Swift binding and three simulator UI tests.
 - `tests/kotlin` / `tests/swift`: actual host-to-Rust tests, not replacements for simulator or device tests.
 
-No NativeSync transport is invented. Exact accepted service source is still needed. The pending component has no server acceptance or task execution authority.
+No NativeSync transport is invented. The R2.1 accepted installation/UX source materials were recovered and partially blob-verified (see docs/NATIVESYNC_R21_SOURCE_MAP.md), but no full accepted checkout or real authenticated HTTPS client exists yet. The pending component has no server acceptance or task execution authority.
 
 ## Build
 

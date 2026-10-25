@@ -1,6 +1,7 @@
 package org.vcptoolbox.nativeclient
 
 import androidx.compose.ui.test.*
+import android.util.Log
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
@@ -30,10 +31,17 @@ class NativeUiTest {
         ui.onNodeWithText("steps", substring = true).assertExists()
     }
     @Test fun cancellationReachesNativeUi() {
+        // Per-step markers survive instrumentation timeouts and identify
+        // the exact action that blocked without weakening any assertion.
+        Log.i("VCPNativeUITest", "cancel: before slow click")
         ui.onNodeWithTag("slow").performScrollTo().performClick()
+        Log.i("VCPNativeUITest", "cancel: slow click returned")
         awaitStatus("RUNNING")
+        Log.i("VCPNativeUITest", "cancel: RUNNING observed")
         ui.onNodeWithTag("cancel").performScrollTo().performClick()
+        Log.i("VCPNativeUITest", "cancel: cancel click returned")
         awaitStatus("CANCELLED")
+        Log.i("VCPNativeUITest", "cancel: CANCELLED observed")
         ui.onNodeWithTag("success").assertIsEnabled()
     }
     @Test fun recreatedActivityCanCallCore() {
