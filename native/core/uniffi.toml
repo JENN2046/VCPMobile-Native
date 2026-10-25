@@ -1,0 +1,8 @@
+[bindings.kotlin]
+package_name = "org.vcptoolbox.nativecore"
+cdylib_name = "vcp_mobile_native"
+
+[bindings.swift]
+module_name = "VcpMobileNative"
+ffi_module_name = "VcpMobileNativeFFI"
+generate_module_map = true

@@ -1,0 +1,8 @@
+[workspace]
+members = ["core"]
+resolver = "2"
+
+[profile.release]
+lto = "thin"
+# Preserve unwinding so UniFFI can turn unexpected failures into errors.
+panic = "unwind"

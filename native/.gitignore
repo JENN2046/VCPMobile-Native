@@ -1,0 +1,5 @@
+/target/
+/generated/
+/tests/kotlin/.gradle/
+/tests/kotlin/build/
+*.dSYM/
