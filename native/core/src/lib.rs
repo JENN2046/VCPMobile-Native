@@ -1,6 +1,6 @@
 //! Shared client building blocks. BridgeProbe is an isolated M1 diagnostic;
-//! pending is bounded local storage. Neither module dispatches network requests,
-//! calls models, accesses credentials, or claims NativeSync server acceptance.
+//! pending is bounded local storage; recovery checks submission receipts.
+//! None dispatches network requests, calls models, or grants server authority.
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 uniffi::setup_scaffolding!();
 
 pub mod pending;
+pub mod recovery;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum ProbeError {
@@ -49,7 +50,6 @@ pub struct ProbeResult {
     pub completed: u32,
 }
 
-/// Callbacks may arrive off the platform UI thread. Hosts must marshal UI work.
 #[uniffi::export(callback_interface)]
 pub trait ProbeListener: Send + Sync {
     fn on_progress(&self, progress: ProbeProgress) -> Result<(), ProbeError>;
@@ -79,7 +79,6 @@ impl BridgeProbe {
     }
 
     /// Cancels only this local diagnostic, never an AA task or remote request.
-    /// The flag is monotonic; use a fresh object for a new run.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.wake.notify_one();

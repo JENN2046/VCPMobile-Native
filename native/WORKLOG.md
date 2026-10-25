@@ -1,29 +1,25 @@
 # Native implementation work log
 
-## Authorized scope
+## Authorization
 
-Continue agreed R1.1 M0–M5 without asking at each milestone. Only development branch/native files and its workflow; no main/PR/merge/release, production/history/account/signing changes or paid models. Original Tauri untouched.
+Continue R1.1 M0–M5 without per-stage approval. Only development branch/native files and its workflow. No main/PR/merge/release, production/history/account/signing changes or paid model calls. Original Tauri and VCP backend remain unchanged.
 
-## First run 40216459025
+## Preserved CI history
 
-Commit `64d66cad618c7338cd07c5ccbcf49f1f5b4641e6`: Rust 12 contracts, Swift-host and Apple-target library compilation passed. Kotlin compiled but JUnit initialization rejected the expression-bodied test with a non-Unit return. Android target was skipped, not passed. Next revision explicitly returned Unit from all test entry points, preserving all tests.
+64d66cad618c7338cd07c5ccbcf49f1f5b4641e6 /40216459025: Rust12, Swift host and Apple target libraries passed. Kotlin initialization failed from non-Unit test return; Android skipped. Next revision explicitly returned Unit, no tests deleted.
 
-## App-host run 40221085134
+7c2977f1105aa961922c1b3312a56e69eeb3faa0 /40221085134: Kotlin4/4, Android APK compiled, emulator3/4 with cancel final-state timeout; iOS simulator3/3 passed. Artifacts Android12609685925 SHA256 abbfcb16c63b16f1eac970461ce115d39a3371676aec3761c336477b3e4a2787; iOS12609419777 SHA256 c09765f2a054b3d3b1cceec91917ef87bc4bea4a76f89e5264c625df9733013e. Locks matched for that dependency set.
 
-Commit `7c2977f1105aa961922c1b3312a56e69eeb3faa0` added actual isolated Compose/SwiftUI hosts and UI automation. Kotlin/JVM 4/4 passed; Android libraries/APK compiled; Android emulator UI 3/4 passed. Cancellation timed out at final CANCELLED expectation. iOS arm64 26.5 simulator 3/3 passed, no skips/expected failures; not real iPhone evidence.
+8f907587e4d952efc63df4b5e25fa18e51659af6 /40222103042: scrollable Android controls plus stronger failure diagnostics; SQLite pending storage with14 tests including real child-process exit after commit. Linux core/host/build passed at observation; emulator still running. macOS script failed at empty `lock_args[@]` under old Bash nounset before compilation, not at a Rust test. This revision removes that array rather than hiding the failure.
 
-Retrieved Android artifact ID12609685925 SHA256 `abbfcb16c63b16f1eac970461ce115d39a3371676aec3761c336477b3e4a2787`; iOS ID12609419777 SHA256 `c09765f2a054b3d3b1cceec91917ef87bc4bea4a76f89e5264c625df9733013e`. Generated locks matched byte-for-byte for the prior dependency set. Original failure XML retained.
+## Accepted source material recovered
 
-## This revision
+Earlier commit/tree404 and content-search misses remain historical facts. Searching Library ZIP metadata found NativeSync_R2.1_Install_20261024.zip and UX3 ZIP. Installation archive size/digest/CRC matched original delivery. Cumulative patches matched their published digests. 26 new-file hunks and2 additional exact baseline files yielded28 accepted blob-verified ToolBox files. No complete checkout/tree rebuild is claimed. Original archives were not copied wholesale into the public repository.
 
-The diagnostic used a fixed non-scrollable Column on a 320x640 emulator. Make it scrollable, scroll controls into view before physical clicks and show the synthetic semantic tree on expectation failure. Layout correction is implemented; causal sufficiency remains subject to rerun. No tests deleted or relaxed.
+Ran exact accepted client submissionRecovery.js under Node22.16.0 to generate50 synthetic hash/receipt cases. New Rust port uses explicit UTF-16 limits, ECMAScript whitespace, normalized attachment hashing and strict original receipt matching. It does not send requests or confer task control. Storage/transport/topic admission integration remains for M2.
 
-Added local pending-submission SQLite and 14 tests: original bytes/identity, namespace, exact cleanup, capacity, corruption, concurrency, cross-session query-only recovery and a child process exiting after commit. It sends no requests, stores no credentials by design and does not claim NativeSync R2.1 compatibility. Added explicit NDK C compiler/archiver target variables for SQLite compilation.
+## Build and evidence repair
 
-## Exact source dependency
+Core script always uses --locked after generating a missing lock. Local synthetic shell tests checked existing/missing lock and propagated test failure. Tracked-source packaging excludes untracked data; optional resolved lock is marked separately; modified tracked lock is refused. Source archive/hash/manifest and bounded synthetic core logs join1day CI artifacts. This is not real local Rust compilation or M5 completion.
 
-ToolBox accepted commit `a9521bc32c1fb427d89ce6dcc0471c999202375f` still returned404. Project/Library lookup did not locate its archive. Old remote sources are reference-only. ProjectForge schema did not expose exact actions/epoch, so no guessed dispatch or RemoteDesktop bypass occurred. M0 source acquisition remains partial.
-
-## Continued execution
-
-The user extended implementation authorization through M5. Hourly external continuation checks live branch/CI and performs bounded available work. Waiting CI does not justify repeated cancellation or stopping the schedule. Only new real blockers or milestones should notify the owner. Real-device/signing/source requirements remain explicit; no background completion guarantee is inferred.
+Hourly continuation is active; it reads live records and advances bounded safe code work. Source lookup is no longer an all-work blocker. Device/signing requirements stay explicit; no guaranteed unattended daemon is implied.

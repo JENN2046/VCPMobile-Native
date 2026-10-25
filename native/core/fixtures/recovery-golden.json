@@ -1,0 +1,23 @@
+{
+  "source":{"path":"apps/mobile/src/submissionRecovery.js","git_blob":"cd4729f206a2007951a468d088f0f085a61ba521","sha256":"5e4852dca74e4121ae56749c39f55e35b822a26004a5f1fbd3b130b56afa1e36","generator":"Node.js v22.16.0 executing exact accepted JS source; synthetic inputs only"},
+  "vectors":[
+    {"name":"text","submission":{"topicKey":"topic_1","kind":"message","payload":{"requestId":"req-0001","text":"hello"}},"payloadHash":"42287ba3c23f8d1241b7745814ed625044cf6ed8a9a984887cee49071cb5691f"},
+    {"name":"empty_attachments","submission":{"topicKey":"topic_1","kind":"message","payload":{"requestId":"req-0001","text":"hello","attachments":[]}},"payloadHash":"42287ba3c23f8d1241b7745814ed625044cf6ed8a9a984887cee49071cb5691f"},
+    {"name":"unicode","submission":{"topicKey":"topic_1","kind":"message","payload":{"requestId":"req-0002","text":"\u4e2d\u6587 \ud83e\udded e\u0301\n\t\"\\\u2028\u2029","attachments":["upload-1","\u9644\u4ef62"]}},"payloadHash":"bedca7861a31c474ac1aa20149b022c01e0964512b3d0471daed8a37002e2bba"},
+    {"name":"attachment_only","submission":{"topicKey":"topic_1","kind":"message","payload":{"requestId":"req-0003","text":"","attachments":["upload-1"]}},"payloadHash":"5ab6b18cef85bbb9798c0747cbcc9d06f5fd924ca2072512acb4b0b36c504046"},
+    {"name":"invitation","submission":{"topicKey":"group_1","kind":"invitation","payload":{"requestId":"req-0004","agentId":"Nova"}},"payloadHash":"d472aacc72729283b49dc1c78d292c1279335effcf00f3635e9c3980e4170b72"}
+  ],
+  "scenarios":{
+    "same_session_missing":{"state":"absent","reason":null,"executionId":null,"executionState":null},
+    "different_session_missing":{"state":"review","reason":"session","executionId":null,"executionState":null},
+    "exact_match":{"state":"confirmed","reason":null,"executionId":"execution-1","executionState":"completed"},
+    "different_session_exact_match":{"state":"confirmed","reason":null,"executionId":"execution-1","executionState":"completed"},
+    "duplicate_candidates":{"state":"review","reason":"ambiguous","executionId":null,"executionState":null},
+    "wrong_topic":{"state":"review","reason":"scope","executionId":null,"executionState":null},
+    "missing_recovery":{"state":"review","reason":"metadata","executionId":null,"executionState":null},
+    "different_hash":{"state":"review","reason":"conflict","executionId":null,"executionState":null},
+    "wrong_entry":{"state":"review","reason":"metadata","executionId":null,"executionState":null},
+    "unknown_is_still_accepted":{"state":"confirmed","reason":null,"executionId":"execution-1","executionState":"review_required"}
+  },
+  "verified_case_count":50
+}
