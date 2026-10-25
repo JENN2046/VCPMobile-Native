@@ -38,3 +38,11 @@ Commit `3dc56a4b0ca20ef46dd9c4cd40f39b98502469bd`: macOS/iOS simulator SUCCESS; 
 Android artifact ID 12614021192 confirmed that success and structured-error tests each ran as standalone JUnit tests and passed. The cancellation test emitted START instrumentation but no finish and reached its 100s hard timeout; filtered logcat contained test-start but no inner-step checkpoints. iOS job succeeded. The Rust suite tested 45 cases (12 bridge,14 pending,6 recovery,7 topic,6 portal), Kotlin4 passed and Android APK compiled. The correct conclusion is Android M1 incomplete, not a platform build failure.
 
 This revision explicitly moves the asynchronous UniFFI invocation to Dispatchers.Default and returns UI state updates to the original Main coroutine; adds action-level Logcat markers without removing any UI assertion; keeps four independent instrumentation cases, executing the lifecycle case before the long cancellation case. This is a hypothesis-driven repair, not a claimed root-cause proof. If cancel remains stuck, use the new last-checkpoint evidence to locate the blocked action rather than further masking the test. No real VCP service was accessed.
+
+## 2026-10-26: M1 cloud simulator passing; M2 first-attempt claim added
+
+Re-read live HEAD f678b1f137532ced950655f2eeb633e568b71b9c and run40236267942. Android 4/4 named emulator instrumentation PASS and iOS simulator 3/3 PASS; both CI jobs SUCCESS. Earlier canceled/timed-out runs remain as original evidence. This is NOT Android/iPhone physical-device testing.
+
+Added pure Rust submission_flow with exact HTTPS origin + authorized GET plans, source-derived payload and context guard, one initial outbound POST intent only after a persisted SQLite claim. Conditional UPDATE atomically fences racing connections and survives process reopen. A failed/ambiguous server receipt never generates an automatic second submission. Reconciliation accepts only exact verified request fingerprint and authorized Topic context, including cross-session READ confirmation without task control. Synthetic tests added but require new CI.
+
+Actual native HTTPS transport, protected Cookie lifecycle, response provenance/status, real service and physical-device acceptance remain pending. No private ZIP copied to the public repository. Generated Cargo.lock from CI has matching recorded hash but is not tracked yet.

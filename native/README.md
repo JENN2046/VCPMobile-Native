@@ -26,3 +26,9 @@ App/bundle ID `org.vcptoolbox.nativeclient.dev` is separate from the old app. Th
 ## Evidence
 
 Read STATUS.md and WORKLOG.md first. Source, host tests, target compilation, app compilation, simulator tests and device acceptance are distinct. An APK does not by itself establish M3 or M5. Preserve failed evidence, source identities and original repository LICENSE/attribution.
+
+## Source-backed R2.1 first-attempt flow (not a network client)
+
+- core/src/submission_flow.rs: bounded exact-origin GET plans; verified payload -> per-entry/Topic SQLite admission -> atomic first-attempt claim -> non-credential POST intent; subsequent attempts require receipt reconciliation, never auto-resend.
+- docs/M2_SUBMISSION_FLOW.md: critical responsibilities for native platform Cookie/TLS handling and the actual HTTP/ACK integrations that are still missing.
+- M1 evidence: run40236267942 on f678b1f is the first exact revision with BOTH Android emulator 4/4 and iOS simulator 3/3 passed. This does not establish M2–M5 or real-device acceptance.

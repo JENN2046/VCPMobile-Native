@@ -205,6 +205,21 @@ impl PendingStore {
         Ok(saved)
     }
 
+    /// Atomic at-most-once local dispatch claim. Never resend on UNKNOWN.
+    /// A crash between this commit and HTTP requires querying the receipt.
+    pub fn claim_first_attempt(&self, key: &RequestKey) -> Result<bool, StoreError> {
+        validate_key(key)?;
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE pending_submission SET state='awaiting_confirmation'
+             WHERE endpoint_id=?1 AND session_marker=?2 AND request_id=?3 AND state='prepared'",
+            params![key.endpoint_id, key.session_marker, key.request_id],
+        )?;
+        if changed == 1 { return Ok(true); }
+        if read_one(&conn, key)?.is_none() { return Err(StoreError::NotFound); }
+        Ok(false)
+    }
+
     /// Persist before dispatch. This operation does not send or accept a request.
     pub fn mark_attempted(&self, key: &RequestKey) -> Result<(), StoreError> {
         validate_key(key)?;
