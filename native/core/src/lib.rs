@@ -14,6 +14,7 @@ pub mod pending;
 pub mod recovery;
 pub mod portal_contract;
 pub mod submission_flow;
+pub mod transport_policy;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum ProbeError {

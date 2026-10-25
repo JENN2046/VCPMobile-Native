@@ -47,3 +47,7 @@ Actions 40236267942 concluded SUCCESS for both Android/Linux and iOS/macOS jobs.
 The generated Cargo.lock from run40236267942 iOS artifact was recovered and SHA256-matched to dc22b3703ebcffcfeb571842785832dab913609cb9fee0af37d658a67fac3a10. It is NOT yet committed. This new revision changes no Cargo dependencies.
 
 New M2 code: source-backed first-attempt request plans and local SQLite atomic dispatch claim, validated Original requestId/payload, exact-receipt observation and cross-session read-only recovery. It has NO HTTPS/Cookie implementation or model calls. The new code/tests require their OWN CI evidence before PASS; M2 remains incomplete.
+
+## 2026-10-26 transport policy boundary (new CI pending)
+
+Exact current HEAD bdf65c5 run40243107680 completed SUCCESS in both macOS/iOS and Linux/Android jobs, validating the prior M2 local first-attempt work. Added source-backed cookie issuance/revocation/scope handling, no-redirect HTTP status policy and authenticated session parsing; tests do not inherit that prior PASS. Real platform HTTPS/Cookie vault is NOT wired, M2–M5 remain incomplete. Only isolated branch source and synthetic tests change; no production or private ZIP publication.

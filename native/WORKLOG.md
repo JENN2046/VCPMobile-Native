@@ -46,3 +46,7 @@ Re-read live HEAD f678b1f137532ced950655f2eeb633e568b71b9c and run40236267942. A
 Added pure Rust submission_flow with exact HTTPS origin + authorized GET plans, source-derived payload and context guard, one initial outbound POST intent only after a persisted SQLite claim. Conditional UPDATE atomically fences racing connections and survives process reopen. A failed/ambiguous server receipt never generates an automatic second submission. Reconciliation accepts only exact verified request fingerprint and authorized Topic context, including cross-session READ confirmation without task control. Synthetic tests added but require new CI.
 
 Actual native HTTPS transport, protected Cookie lifecycle, response provenance/status, real service and physical-device acceptance remain pending. No private ZIP copied to the public repository. Generated Cargo.lock from CI has matching recorded hash but is not tracked yet.
+
+## 2026-10-26 transport policy boundary (new CI pending)
+
+Exact current HEAD bdf65c5 run40243107680 completed SUCCESS in both macOS/iOS and Linux/Android jobs, validating the prior M2 local first-attempt work. Added source-backed cookie issuance/revocation/scope handling, no-redirect HTTP status policy and authenticated session parsing; tests do not inherit that prior PASS. Real platform HTTPS/Cookie vault is NOT wired, M2–M5 remain incomplete. Only isolated branch source and synthetic tests change; no production or private ZIP publication.
