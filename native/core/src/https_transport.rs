@@ -78,6 +78,7 @@ impl PortalHttpClient {
         let client = Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .no_proxy()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(15))

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Four original UI contracts and six secure vault contracts.
+# Four original UI, six secure vault, and two offline connection UI contracts.
 # Every test is a fresh instrumentation process; timeout always fails.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -25,6 +25,8 @@ tests=(
   PortalVaultTest#ciphertextCannotMoveToAnotherOrigin
   PortalVaultTest#missingKeyNeverRegeneratesOrResends
   PortalVaultTest#removalIsOriginScopedAndUnpairedFetchDoesNotUseNetwork
+  ConnectionUiTest#invalidPairingIsLocalAndClearsCode
+  ConnectionUiTest#unpairedRestoreDoesNotStartPairing
 )
 for method in "${tests[@]}"; do
   output="target/evidence/android-${method}.txt"
@@ -45,4 +47,4 @@ for method in "${tests[@]}"; do
   fi
   printf 'PASS %s\n' "$method" | tee -a "$report"
 done
-printf 'PASS all four UI and six vault test methods\n' | tee -a "$report"
+printf 'PASS all four bridge UI, six vault and two connection UI test methods\n' | tee -a "$report"

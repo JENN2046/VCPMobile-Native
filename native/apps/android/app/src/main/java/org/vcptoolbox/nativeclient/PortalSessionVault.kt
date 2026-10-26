@@ -13,6 +13,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.vcptoolbox.nativecore.PairingAttempt
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.SessionCredential
 import org.vcptoolbox.nativecore.credentialStorageKey
@@ -84,10 +85,14 @@ internal class PortalSessionVault(context: Context) {
         try { return SessionCredential.restore(origin, plain) }
         finally { plain.fill(0) }
     }
-    suspend fun save(credential: SessionCredential) = withContext(Dispatchers.IO) {
+    suspend fun save(credential: SessionCredential) = saveChecked(credential, null)
+    private suspend fun saveChecked(credential: SessionCredential, expectedEpoch: Long?) = withContext(Dispatchers.IO) {
         synchronized(gate) {
             try {
                 val id = credential.storageKey()
+                if (expectedEpoch != null && (epochs[id] ?: 0L) != expectedEpoch) {
+                    throw PortalVaultException("SESSION_CHANGED")
+                }
                 val plain = credential.secretBytesForVault()
                 try {
                     if (plain.size > 2048) throw PortalVaultException("INVALID_RECORD")
@@ -142,6 +147,21 @@ internal class PortalSessionVault(context: Context) {
             } catch (failure: PortalVaultException) { throw failure }
             catch (_: Exception) { throw PortalVaultException("DELETE_FAILED") }
         }
+    }
+    /** Explicit one-use pairing. A late response cannot undo removal/new pairing.
+     * Save first, query later. Never retries a consumed code after a failed GET.
+     */
+    suspend fun pairAndSave(origin: String, code: String) {
+        val operation = PairingAttempt(origin, code)
+        try {
+            val id = keyId(origin)
+            val epoch = withContext(Dispatchers.IO) {
+                synchronized(gate) { bump(id); epochs.getValue(id) }
+            }
+            val credential = withContext(Dispatchers.Default) { operation.pair() }
+            try { saveChecked(credential, epoch) }
+            finally { credential.destroy() }
+        } finally { operation.destroy() }
     }
     /** Only a deliberate caller can issue GET. Never launch automatically. */
     suspend fun fetchSession(origin: String): NativeSessionInfo {

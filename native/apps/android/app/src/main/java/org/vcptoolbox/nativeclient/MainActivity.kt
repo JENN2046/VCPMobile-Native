@@ -80,7 +80,7 @@ class ProbeViewModel : ViewModel() {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { Surface(Modifier.fillMaxSize()) { ProbeScreen() } } }
+        setContent { MaterialTheme { Surface(Modifier.fillMaxSize()) { NativeRoot() } } }
     }
 }
 

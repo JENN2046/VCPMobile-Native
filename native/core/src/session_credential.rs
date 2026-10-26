@@ -118,12 +118,20 @@ impl SessionCredential {
 fn parsed_origin(raw: &str) -> Result<HttpsOrigin, SessionCredentialError> {
     HttpsOrigin::parse(raw).map_err(|_| SessionCredentialError::InvalidOrigin)
 }
-fn now_ms() -> Result<u64, SessionCredentialError> {
+pub(crate) fn now_ms() -> Result<u64, SessionCredentialError> {
     let value = SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(|_| SessionCredentialError::ClockInvalid)?.as_millis();
     u64::try_from(value).map_err(|_| SessionCredentialError::ClockInvalid)
 }
 impl SessionCredential {
+    /// Internal TLS adapter entry; conservative expiry begins before the POST.
+    pub(crate) fn from_pairing_response(origin: &str, header: &str, started: u64)
+        -> Result<Arc<Self>, SessionCredentialError>
+    {
+        let credential = Self::issue_at(origin, origin, header, started)?;
+        credential.ensure_valid_at(now_ms()?)?;
+        Ok(Arc::new(credential))
+    }
     fn issue_at(origin: &str, response: &str, header: &str, now: u64)
         -> Result<Self, SessionCredentialError>
     {

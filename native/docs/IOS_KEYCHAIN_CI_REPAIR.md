@@ -1,6 +1,6 @@
 # iOS simulator Keychain repair, 2026-10-26
 
-Issue: JENN2046/VCPMobile-Native#1. This entry records a targeted candidate, not a passed repair.
+Issue: JENN2046/VCPMobile-Native#1. The candidate and original failure below are historical; the final section records its exact verified simulator result.
 
 ## Exact failing baseline
 
@@ -29,3 +29,7 @@ Sources:
 - https://developer.apple.com/forums/thread/114456
 - https://developer.apple.com/documentation/security/sharing-access-to-keychain-items-among-a-collection-of-apps
 - https://developer.apple.com/forums/thread/826882
+
+## Verified result
+
+Commit6c6b4c4700e2f06358431dd0fe7f90cad6835619 / run40290030154: both jobs SUCCESS. Retrieved iOS summary records9 passed,0 failed/skipped/expected failures, covering the unchanged6 real Keychain and3 UI tests. Artifact12635887933 SHA256 b32b5fb5be7d4a3e91cb7237ccefa19bdbb11cf4c5f06b900e24ece9997ecc80. The specific simulator regression is resolved at this SHA; real devices and M2 service acceptance are not inferred.

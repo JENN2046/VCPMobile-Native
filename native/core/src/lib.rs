@@ -1,6 +1,6 @@
 //! Shared client building blocks. BridgeProbe is an isolated M1 diagnostic;
 //! pending is bounded local storage; recovery checks submission receipts.
-//! None dispatches network requests, calls models, or grants server authority.
+//! Network modules act only when explicitly called; no module grants server authority.
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -17,6 +17,7 @@ pub mod submission_flow;
 pub mod transport_policy;
 pub mod https_transport;
 pub mod session_credential;
+pub mod pairing;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum ProbeError {

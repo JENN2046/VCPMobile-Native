@@ -65,6 +65,18 @@ actor PortalSessionVault {
             throw PortalVaultError.unavailable
         }
     }
+    /// One deliberate pairing POST. Persist before any session query.
+    /// Removing/replacing the session while HTTPS is in flight fences this result.
+    func pairAndSave(_ origin: String, code: String) async throws {
+        let operation = try PairingAttempt(origin: origin, code: code)
+        let key = try credentialStorageKey(origin: origin)
+        epochs[key, default: 0] &+= 1
+        let epoch = epochs[key, default: 0]
+        let credential = try await operation.pair()
+        try Task.checkCancellation()
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        try save(credential)
+    }
     /// Explicit read-only session query. Nothing runs on app launch.
     func fetchSession(_ origin: String) async throws -> NativeSessionInfo {
         let key = try credentialStorageKey(origin: origin)

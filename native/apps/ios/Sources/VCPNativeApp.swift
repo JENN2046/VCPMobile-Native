@@ -86,5 +86,5 @@ struct ProbeView: View {
 }
 
 @main struct VCPNativeApp: App {
-    var body: some Scene { WindowGroup { ProbeView() } }
+    var body: some Scene { WindowGroup { NativeRoot() } }
 }
