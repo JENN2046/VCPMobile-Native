@@ -6,7 +6,13 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    CODE_SIGNING_ALLOWED: NO
+    # Distribution/device signing remains unconfigured. Simulator execution
+    # needs its normal local signature and injected app identity for Keychain.
+    CODE_SIGNING_ALLOWED: "NO"
+    "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": "YES"
+    "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+    "CODE_SIGN_INJECT_BASE_ENTITLEMENTS[sdk=iphonesimulator*]": "YES"
+    "DEVELOPMENT_TEAM[sdk=iphonesimulator*]": ""
     SWIFT_INCLUDE_PATHS: "$(inherited) $(SRCROOT)/../../generated/swift"
     OTHER_SWIFT_FLAGS: "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../../generated/swift/VcpMobileNativeFFI.modulemap"
     "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": "$(inherited) $(SRCROOT)/../../target/${VCP_RUST_SIM_TARGET}/release"
