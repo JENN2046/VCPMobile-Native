@@ -1,0 +1,101 @@
+name: Native Apps M1 Verification
+on:
+  push:
+    branches: ["codex/native-rust-m0-m1"]
+    paths: ["native/**", ".github/workflows/native-core.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-core-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  rust-kotlin-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        working-directory: native
+        run: rustup toolchain install 1.90.0 --profile minimal --component clippy,rustfmt
+      - name: Test core and generate actual bindings
+        run: bash native/scripts/check.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+          cache-disabled: true
+      - name: Kotlin calls actual Rust library on JVM
+        run: gradle -p native/tests/kotlin --no-daemon test
+      - name: Build Android libraries and Compose application
+        run: bash native/scripts/build-android.sh
+      - name: Enable KVM for the isolated emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Compose UI to Rust on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash native/scripts/test-android-emulator.sh
+      - name: Package exact tracked source and resolved dependency identity
+        if: always()
+        run: python3 native/scripts/package-evidence.py
+      - name: Save bounded synthetic evidence and development APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-android-${{ github.sha }}
+          retention-days: 1
+          path: |
+            native/Cargo.lock
+            native/target/evidence/*
+            native/tests/kotlin/build/test-results/test/*.xml
+            native/apps/android/app/build/outputs/apk/debug/*.apk
+            native/apps/android/app/build/outputs/androidTest-results/connected/**/*.xml
+  rust-swift-ios:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        working-directory: native
+        run: rustup toolchain install 1.90.0 --profile minimal --component clippy,rustfmt
+      - name: Test core and generate actual bindings
+        run: bash native/scripts/check.sh
+      - name: Swift calls actual Rust library on macOS
+        run: bash native/tests/swift/run.sh
+      - name: Ensure XcodeGen is available
+        run: command -v xcodegen || brew install xcodegen
+      - name: SwiftUI application to Rust on iOS simulator
+        run: bash native/scripts/test-ios.sh
+      - name: Export simulator test summary
+        if: always()
+        run: |
+          if [ -d native/target/ios-ui.xcresult ]; then
+            xcrun xcresulttool get test-results summary --path native/target/ios-ui.xcresult > native/target/ios-ui-summary.json
+          fi
+      - name: Package exact tracked source and resolved dependency identity
+        if: always()
+        run: python3 native/scripts/package-evidence.py
+      - name: Save bounded synthetic iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ios-${{ github.sha }}
+          retention-days: 1
+          path: |
+            native/Cargo.lock
+            native/target/evidence/*
+            native/target/ios-ui-summary.json
