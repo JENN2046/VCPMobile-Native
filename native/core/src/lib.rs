@@ -16,6 +16,7 @@ pub mod portal_contract;
 pub mod submission_flow;
 pub mod transport_policy;
 pub mod https_transport;
+pub mod session_credential;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum ProbeError {
