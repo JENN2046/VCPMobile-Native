@@ -54,3 +54,7 @@ Exact current HEAD bdf65c5 run40243107680 completed SUCCESS in both macOS/iOS an
 ## 2026-10-26 new HTTPS GET slice
 
 Observed live HEAD d08c76e7ae6d4abb639ada5741b626ede6e80079 and CI run 40245151245 both SUCCESS. Implemented a real caller-triggered GET /mobile/api/session in Rust, verified source-defined path and strict TLS/Cookie origin, response size, no redirect or automatic cookie jar. No network to production, no task authority or side effects. This change must be tested in its own CI, and a newly resolved Cargo.lock must be committed next. No host Keychain/Keystore yet.
+
+## 2026-10-26: verified GET session build and history GET candidate
+
+Live HEAD 11e753e8a9ce4046bd21b9e4bf5835d0165c1142, run40250516435 concluded SUCCESS in both Linux/Android and macOS/iOS CI jobs; initial read-only session GET client tests and all M1 simulators passed on that SHA. Downloaded synthetic iOS artifact12620309352, verified Cargo.lock exact SHA256 0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465; resolved lock remains untracked. The next slice adds a real but uninvoked authorized history GET builder and body reader with strict context, no redirects, no cookie changes and no auto-application. All real message schema interpretation, app vault wiring and authenticated service fixtures remain pending. This new revision needs new CI evidence.

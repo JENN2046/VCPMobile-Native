@@ -3,6 +3,7 @@
 //! Does not pair, POST, grant task authority or contact any server until called.
 use crate::portal_contract::PortalSession;
 use crate::submission_flow::HttpsOrigin;
+use serde_json::Value;
 use crate::transport_policy::{parse_session_response, PortalCookie, TransportPolicyError};
 use reqwest::header::{HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use reqwest::{Client, Method, Request};
@@ -10,6 +11,9 @@ use std::fmt;
 use std::time::Duration;
 
 const MAX_SESSION_BYTES: usize = 512 * 1024;
+// A single server page contains at most 200 history messages; fail closed
+// on larger data rather than truncating it or advancing the cursor.
+const MAX_HISTORY_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PortalHttpError {
@@ -29,8 +33,33 @@ pub enum PortalHttpError {
     UnexpectedCookieChange,
     #[error("response body exceeds bound")]
     ResponseTooLarge,
+    #[error("history request denied or response unverified")]
+    InvalidHistory,
     #[error("session rejected: {0}")]
     SessionRejected(#[from] TransportPolicyError),
+}
+
+
+/// Tagged, raw read-only history. It must not be treated as a persisted or
+/// applied NativeSync fact until the separate history contract is validated.
+#[derive(Clone)]
+pub struct HistorySnapshot {
+    pub entry_id: String,
+    pub session_marker: String,
+    pub topic_key: String,
+    pub after: u64,
+    pub document: Value,
+}
+impl fmt::Debug for HistorySnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HistorySnapshot")
+            .field("entry_id", &"[REDACTED]")
+            .field("session_marker", &"[REDACTED]")
+            .field("topic_key", &self.topic_key)
+            .field("after", &self.after)
+            .field("document", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// No automatic cookies or app secrets stored in this type.
@@ -69,6 +98,76 @@ impl PortalHttpClient {
             .header(COOKIE, value)
             .build()
             .map_err(|_| PortalHttpError::Initialization)
+    }
+
+
+    /// A synthetic-only request constructor; it rejects unknown Topics, unsafe
+    /// cursors and cookies from a different origin before any network action.
+    fn history_request(
+        &self, cookie: &PortalCookie, session: &PortalSession,
+        topic_key: &str, after: u64,
+    ) -> Result<Request, PortalHttpError> {
+        let plan = crate::submission_flow::history_request(
+            self.origin.as_str(), session, topic_key, after,
+        ).map_err(|_| PortalHttpError::InvalidHistory)?;
+        let value = cookie.header_for(&self.origin, &plan.path_and_query)
+            .map_err(|_| PortalHttpError::CookieDenied)?;
+        let value = HeaderValue::from_str(&value)
+            .map_err(|_| PortalHttpError::CookieDenied)?;
+        self.client.request(
+            Method::GET, format!("{}{}", self.origin.as_str(), plan.path_and_query),
+        )
+        .header(ACCEPT, HeaderValue::from_static("application/json"))
+        .header(COOKIE, value)
+        .build()
+        .map_err(|_| PortalHttpError::Initialization)
+    }
+
+    /// Fetches the original authorized Topic's read-only history page only.
+    /// No new task, execution, model request, or client-side cursor update.
+    /// The caller must retain provenance and never apply the opaque JSON
+    /// automatically as a validated receipt or user-visible chat message.
+    pub async fn fetch_history(
+        &self, cookie: &PortalCookie, session: &PortalSession,
+        topic_key: &str, after: u64,
+    ) -> Result<HistorySnapshot, PortalHttpError> {
+        let request = self.history_request(cookie, session, topic_key, after)?;
+        let expected_url = request.url().clone();
+        let mut response = self.client.execute(request).await.map_err(network_error)?;
+        if response.url() != &expected_url {
+            return Err(PortalHttpError::ResponseOrigin);
+        }
+        if response.headers().contains_key(SET_COOKIE) {
+            return Err(PortalHttpError::UnexpectedCookieChange);
+        }
+        if response.status().as_u16() != 200 {
+            return Err(PortalHttpError::InvalidHistory);
+        }
+        let mime_ok = response.headers().get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"));
+        if !mime_ok || response.content_length()
+            .is_some_and(|n| n > MAX_HISTORY_BYTES as u64) {
+            return Err(PortalHttpError::InvalidHistory);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+            if chunk.len() > MAX_HISTORY_BYTES.saturating_sub(body.len()) {
+                return Err(PortalHttpError::ResponseTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let document: Value = serde_json::from_slice(&body)
+            .map_err(|_| PortalHttpError::InvalidHistory)?;
+        if !document.is_object() {
+            return Err(PortalHttpError::InvalidHistory);
+        }
+        Ok(HistorySnapshot {
+            entry_id: session.entry_id.clone(),
+            session_marker: session.session_marker.clone(),
+            topic_key: topic_key.to_owned(), after, document,
+        })
     }
 
     /// Actual request, but no execution or POST acceptance.
@@ -139,6 +238,51 @@ mod tests {
         assert!(!request.headers().contains_key(reqwest::header::AUTHORIZATION));
         assert!(!format!("{client:?}").contains("zzzzzzzz"));
     }
+
+    fn authorized_session() -> PortalSession {
+        let doc = serde_json::json!({
+            "authenticated":true,
+            "recovery":{"version":1,"entryId":"a".repeat(64),"sessionMarker":"b".repeat(64)},
+            "topics":[{"key":"topic_a"},{"key":"group_1"}],
+            "selectedTopic":"topic_a"
+        });
+        PortalSession::parse(&doc.to_string()).unwrap()
+    }
+    #[test]
+    fn authorized_history_request_stays_get_and_bound_to_topic_and_cookie() {
+        let client = PortalHttpClient::new("https://mobile.example.org").unwrap();
+        let s = authorized_session();
+        let request = client.history_request(&cookie(), &s, "topic_a", 42).unwrap();
+        assert_eq!(request.method(), Method::GET);
+        assert_eq!(request.url().as_str(),
+            "https://mobile.example.org/mobile/api/conversations/topic_a?after=42");
+        assert!(request.headers().contains_key(COOKIE));
+        assert!(!request.headers().contains_key(reqwest::header::ORIGIN));
+        assert!(request.body().is_none());
+        assert!(matches!(client.history_request(&cookie(), &s, "other", 0),
+            Err(PortalHttpError::InvalidHistory)));
+        assert!(matches!(client.history_request(&cookie(), &s, "topic_a", 9_007_199_254_740_992),
+            Err(PortalHttpError::InvalidHistory)));
+        let foreign = PortalHttpClient::new("https://wrong.example.org").unwrap();
+        assert!(matches!(foreign.history_request(&cookie(), &s, "topic_a", 0),
+            Err(PortalHttpError::CookieDenied)));
+    }
+    #[test]
+    fn history_debug_never_exposes_raw_messages_or_session_markers() {
+        let s = authorized_session();
+        let snapshot = HistorySnapshot {
+            entry_id:s.entry_id.clone(),
+            session_marker:s.session_marker.clone(),
+            topic_key:"topic_a".into(), after:0,
+            document:serde_json::json!({"messages":[{"text":"SYNTHETIC_SECRET_MARKER"}]}),
+        };
+        let output = format!("{snapshot:?}");
+        assert!(!output.contains("SYNTHETIC_SECRET_MARKER"));
+        assert!(!output.contains(&s.entry_id));
+        assert!(!output.contains(&s.session_marker));
+        assert!(output.contains("topic_a"));
+    }
+
     #[test]
     fn session_parser_is_not_post_acceptance() {
         assert!(matches!(parse_session_response(202, Some("application/json"), b"{}"),

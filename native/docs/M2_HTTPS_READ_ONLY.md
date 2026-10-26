@@ -11,3 +11,7 @@ This is the first actual network implementation, deliberately limited to authent
 - Unit tests cover actual reqwest request construction and rejection of untrusted origins; they do not emulate successful live TLS to the service.
 - The Rust native client has no credential vault and no pairing. iOS and Android secure stores, real authenticated server fixture, session renewal, submit/ACK reconciliation and physical devices are pending.
 - Added pinned reqwest 0.12.23 Rustls+stream dependency, so the old Cargo.lock digest is obsolete. Resolve a new lock from actual CI, verify its identity and commit it as a distinct reproducibility step.
+
+## Topic history read-only slice (requires new CI evidence)
+
+The next code slice adds `PortalHttpClient::fetch_history` for source-confirmed `GET /mobile/api/conversations/:key?after=<cursor>`. Only a `PortalSession`-authorized Topic, JS-safe cursor and same pinned Cookie origin can build the request. The client enforces HTTP 200 JSON object, exact response URL, no Set-Cookie, Content-Length/streaming 2 MiB bound and no redirect/proxy. Returned `HistorySnapshot` retains entry/session/Topic/cursor provenance, but deliberately does not parse/apply messages, update a cursor, clear pending state or dispatch POST. It is not a validated execution receipt. No actual service was contacted and this commit requires its own CI.

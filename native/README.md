@@ -36,3 +36,6 @@ Read STATUS.md and WORKLOG.md first. Source, host tests, target compilation, app
 ## M2 read-only HTTPS candidate
 
 core/src/https_transport.rs implements an actual Rust HTTPS GET /mobile/api/session with a validated server-issued Cookie object and conservative response checks. M1 diagnostic UIs do not invoke it. Keychain/Keystore, pairing, POST and real service tests remain absent. See docs/M2_HTTPS_READ_ONLY.md.
+
+
+The next M2 read-only slice adds an authorized raw Topic history GET to `https_transport.rs`, without claiming actual server/device acceptance. The response is deliberately opaque; it cannot clear pending writes or add messages. See `docs/M2_HTTPS_READ_ONLY.md` and live STATUS for test evidence.
