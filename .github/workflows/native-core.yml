@@ -1,7 +1,7 @@
 name: Native Apps M1 Verification
 on:
   push:
-    branches: ["codex/native-rust-m0-m1", "codex/android-chat-candidate-20261026"]
+    branches: ["codex/native-rust-m0-m1", "codex/android-chat-candidate-20261026", "codex/native-directed-verification-20261026"]
     paths: ["native/**", ".github/workflows/native-core.yml"]
   workflow_dispatch:
     inputs:
