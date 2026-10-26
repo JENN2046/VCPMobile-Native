@@ -32,3 +32,7 @@ Read STATUS.md and WORKLOG.md first. Source, host tests, target compilation, app
 - core/src/submission_flow.rs: bounded exact-origin GET plans; verified payload -> per-entry/Topic SQLite admission -> atomic first-attempt claim -> non-credential POST intent; subsequent attempts require receipt reconciliation, never auto-resend.
 - docs/M2_SUBMISSION_FLOW.md: critical responsibilities for native platform Cookie/TLS handling and the actual HTTP/ACK integrations that are still missing.
 - M1 evidence: run40236267942 on f678b1f is the first exact revision with BOTH Android emulator 4/4 and iOS simulator 3/3 passed. This does not establish M2–M5 or real-device acceptance.
+
+## M2 read-only HTTPS candidate
+
+core/src/https_transport.rs implements an actual Rust HTTPS GET /mobile/api/session with a validated server-issued Cookie object and conservative response checks. M1 diagnostic UIs do not invoke it. Keychain/Keystore, pairing, POST and real service tests remain absent. See docs/M2_HTTPS_READ_ONLY.md.

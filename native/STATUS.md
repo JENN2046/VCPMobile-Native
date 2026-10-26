@@ -51,3 +51,7 @@ New M2 code: source-backed first-attempt request plans and local SQLite atomic d
 ## 2026-10-26 transport policy boundary (new CI pending)
 
 Exact current HEAD bdf65c5 run40243107680 completed SUCCESS in both macOS/iOS and Linux/Android jobs, validating the prior M2 local first-attempt work. Added source-backed cookie issuance/revocation/scope handling, no-redirect HTTP status policy and authenticated session parsing; tests do not inherit that prior PASS. Real platform HTTPS/Cookie vault is NOT wired, M2–M5 remain incomplete. Only isolated branch source and synthetic tests change; no production or private ZIP publication.
+
+## 2026-10-26 read-only HTTPS transport candidate, verification pending
+
+Live HEAD d08c76e7ae6d4abb639ada5741b626ede6e80079 CI 40245151245: both Android/Linux and iOS/macOS jobs SUCCESS, validating the previous HTTP policy component. New isolated core/src/https_transport.rs uses a real pinned-origin, no-proxy, no-redirect Rust HTTPS session GET, in-memory scoped Cookie and bounded streaming response. NO real service connection, app invocation, protected platform vault, pairing, POST or real-device test occurred. This new code and reqwest dependency have no CI result yet; M2 still incomplete. Previous Cargo.lock hash cannot be reused after dependency update.

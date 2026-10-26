@@ -50,3 +50,7 @@ Actual native HTTPS transport, protected Cookie lifecycle, response provenance/s
 ## 2026-10-26 transport policy boundary (new CI pending)
 
 Exact current HEAD bdf65c5 run40243107680 completed SUCCESS in both macOS/iOS and Linux/Android jobs, validating the prior M2 local first-attempt work. Added source-backed cookie issuance/revocation/scope handling, no-redirect HTTP status policy and authenticated session parsing; tests do not inherit that prior PASS. Real platform HTTPS/Cookie vault is NOT wired, M2–M5 remain incomplete. Only isolated branch source and synthetic tests change; no production or private ZIP publication.
+
+## 2026-10-26 new HTTPS GET slice
+
+Observed live HEAD d08c76e7ae6d4abb639ada5741b626ede6e80079 and CI run 40245151245 both SUCCESS. Implemented a real caller-triggered GET /mobile/api/session in Rust, verified source-defined path and strict TLS/Cookie origin, response size, no redirect or automatic cookie jar. No network to production, no task authority or side effects. This change must be tested in its own CI, and a newly resolved Cargo.lock must be committed next. No host Keychain/Keystore yet.
