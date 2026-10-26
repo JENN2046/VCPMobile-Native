@@ -1,0 +1,15 @@
+{
+  "source_repository": "JENN2046/VCPMobile",
+  "source_base": "88ee3aca0e6a57a9ab830ac4bf380770138f1ed0",
+  "source_head": "a615bff38e497419c62f1bef1601add6ee19bcca",
+  "source_tree": "d5b8cc9317d983a11010b922b4aa14d7a7f43c7a",
+  "filtered_head": "af9c92052764aa5ba4fc5ee167ecf4815a771255",
+  "development_commits": 16,
+  "source_file_count": 59,
+  "source_manifest_sha256": "754a10b0dbd349f27222b3f5d3e113d51700b02e2418a310522b1796902e1fe8",
+  "workflow_blob": "0181ec68b33269eb3b072f2b4d7a8b8b3dbab0a4",
+  "workflow_history_note": "Native and LICENSE history filtered; current workflow is imported byte-for-byte separately. Historical workflow blobs remain referenced in COMMIT_MAP and source repository.",
+  "bootstrap_head": "f21cec47ebf0cade90fcc438b2a5f8732c0de4f0",
+  "import_run": "40286916129",
+  "status": "SCOPED_HISTORY_STAGED_PENDING_CUTOVER_AND_CI"
+}
