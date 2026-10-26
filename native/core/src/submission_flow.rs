@@ -64,7 +64,7 @@ impl HttpsOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadOnlyRequest {
-    pub origin: HttpsOrigin,
+    origin: HttpsOrigin,
     pub path_and_query: String,
 }
 pub fn session_request(origin: &str) -> Result<ReadOnlyRequest, FlowError> {
@@ -82,16 +82,20 @@ pub fn history_request(origin: &str, session: &PortalSession, key: &str, after: 
 
 /// Caller injects Origin, Content-Type, paired guards and the separately
 /// protected __Secure-vcp_mobile Cookie. This data does NOT send itself.
-#[derive(Clone, PartialEq, Eq)]
+#[must_use = "a claimed request is not server acceptance"]
+#[derive(PartialEq, Eq)]
 pub struct OutboundSubmission {
     pub origin: HttpsOrigin,
-    pub path: String,
-    pub entry_id: String,
-    pub session_marker: String,
-    pub request_id: String,
+    path: String,
+    entry_id: String,
+    session_marker: String,
+    request_id: String,
     original_json: String,
 }
 impl OutboundSubmission {
+    pub fn origin(&self) -> &HttpsOrigin { &self.origin }
+    pub fn path(&self) -> &str { &self.path }
+    pub fn request_id(&self) -> &str { &self.request_id }
     pub fn original_body(&self) -> &str { &self.original_json }
     pub fn content_type(&self) -> &'static str { "application/json" }
     pub fn origin_header(&self) -> &str { self.origin.as_str() }

@@ -58,3 +58,9 @@ Observed live HEAD d08c76e7ae6d4abb639ada5741b626ede6e80079 and CI run 402451512
 ## 2026-10-26: verified GET session build and history GET candidate
 
 Live HEAD 11e753e8a9ce4046bd21b9e4bf5835d0165c1142, run40250516435 concluded SUCCESS in both Linux/Android and macOS/iOS CI jobs; initial read-only session GET client tests and all M1 simulators passed on that SHA. Downloaded synthetic iOS artifact12620309352, verified Cargo.lock exact SHA256 0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465; resolved lock remains untracked. The next slice adds a real but uninvoked authorized history GET builder and body reader with strict context, no redirects, no cookie changes and no auto-application. All real message schema interpretation, app vault wiring and authenticated service fixtures remain pending. This new revision needs new CI evidence.
+
+## 2026-10-26 post-GET one-time POST candidate
+
+Verified latest before change: 5412314cc55832717131b64aba9666d37c0997fe, Actions40255755182 both jobs SUCCESS. Retrieved run's bounded iOS artifact and verified Cargo.lock SHA256 `0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465`, still not tracked.
+
+Added explicit one-shot HTTPS POST method consuming a non-Clone private-field OutboundSubmission from SQLite first_attempt. Strict same-origin Cookie, Origin and context guards, original bytes, no retries or Cookie rotation, bounded response; 202 remains unverified, pending retained. Two offline tests inspect exact reqwest request and origin rejection. No real host Cookie or production HTTP invoked. New revision's CI must run before any pass claim.

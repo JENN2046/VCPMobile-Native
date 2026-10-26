@@ -39,3 +39,7 @@ core/src/https_transport.rs implements an actual Rust HTTPS GET /mobile/api/sess
 
 
 The next M2 read-only slice adds an authorized raw Topic history GET to `https_transport.rs`, without claiming actual server/device acceptance. The response is deliberately opaque; it cannot clear pending writes or add messages. See `docs/M2_HTTPS_READ_ONLY.md` and live STATUS for test evidence.
+
+## M2 once-only HTTPS POST candidate
+
+A new explicitly consumed and source-scoped `PortalHttpClient::submit_claimed_once` sends only a persisted first-attempt plan; its response never clears pending or grants task authority. The diagnostic apps do not invoke POST or hold a real Cookie. See `docs/M2_POST_TRANSPORT.md` and exact CI evidence.

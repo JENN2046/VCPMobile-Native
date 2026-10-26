@@ -291,3 +291,166 @@ mod tests {
             Err(TransportPolicyError::RedirectDenied)));
     }
 }
+
+
+/// An explicit single POST transport observation. A successful 202 is NOT a
+/// durable receipt, an AA completion, or permission to remove pending state.
+#[derive(Debug, thiserror::Error)]
+pub enum SubmissionTransportError {
+    #[error("claimed submission origin does not match pinned HTTPS entry")]
+    PlanOrigin,
+    #[error("session Cookie is not valid for this entry and route")]
+    CookieScope,
+    #[error("invalid guarded submission request")]
+    Request,
+    #[error("request timed out; preserve original pending state")]
+    Timeout,
+    #[error("transport failure; preserve original pending state")]
+    Network,
+    #[error("unexpected response URL or session Cookie mutation")]
+    Response,
+    #[error("bounded submission response exceeded size limit")]
+    OversizedResponse,
+}
+
+impl PortalHttpClient {
+    /// Pure builder. Do not expose this as a generic multi-use POST API.
+    fn submission_request(
+        &self,
+        cookie: &PortalCookie,
+        plan: &crate::submission_flow::OutboundSubmission,
+    ) -> Result<Request, SubmissionTransportError> {
+        if plan.origin() != &self.origin {
+            return Err(SubmissionTransportError::PlanOrigin);
+        }
+        let cookie_header = cookie.header_for(&self.origin, plan.path())
+            .map_err(|_| SubmissionTransportError::CookieScope)?;
+        let cookie_header = HeaderValue::from_str(&cookie_header)
+            .map_err(|_| SubmissionTransportError::CookieScope)?;
+        let origin_header = HeaderValue::from_str(plan.origin_header())
+            .map_err(|_| SubmissionTransportError::Request)?;
+        let mut builder = self.client.request(
+            Method::POST,
+            format!("{}{}", self.origin.as_str(), plan.path()),
+        ).header(ACCEPT, HeaderValue::from_static("application/json"))
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .header(reqwest::header::ORIGIN, origin_header)
+            .header(COOKIE, cookie_header);
+        for (name, value) in plan.guard_headers() {
+            builder = builder.header(name, HeaderValue::from_str(value)
+                .map_err(|_| SubmissionTransportError::Request)?);
+        }
+        builder.body(plan.original_body().to_owned()).build()
+            .map_err(|_| SubmissionTransportError::Request)
+    }
+
+    /// Send exactly once, consuming an atomically claimed, non-Clone intent.
+    /// No retries, no pending cleanup, no new model calls, no task controls.
+    /// The caller MUST have sourced the Cookie and session from authenticated
+    /// platform custody; neither mobile app is wired to this method yet.
+    pub async fn submit_claimed_once(
+        &self,
+        cookie: &PortalCookie,
+        plan: crate::submission_flow::OutboundSubmission,
+    ) -> Result<crate::transport_policy::SubmissionHttpOutcome, SubmissionTransportError> {
+        let request = self.submission_request(cookie, &plan)?;
+        let expected = request.url().clone();
+        let mut response = self.client.execute(request).await.map_err(|e| {
+            if e.is_timeout() { SubmissionTransportError::Timeout }
+            else { SubmissionTransportError::Network }
+        })?;
+        if response.url() != &expected || response.headers().contains_key(SET_COOKIE) {
+            return Err(SubmissionTransportError::Response);
+        }
+        const LIMIT: usize = 128 * 1024;
+        if response.content_length().is_some_and(|n| n > LIMIT as u64) {
+            return Err(SubmissionTransportError::OversizedResponse);
+        }
+        let status = response.status().as_u16();
+        let content_type = response.headers().get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| {
+            if e.is_timeout() { SubmissionTransportError::Timeout }
+            else { SubmissionTransportError::Network }
+        })? {
+            if chunk.len() > LIMIT.saturating_sub(body.len()) {
+                return Err(SubmissionTransportError::OversizedResponse);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(crate::transport_policy::classify_submission_response(
+            status, content_type.as_deref(), &body,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod submission_transport_tests {
+    use super::*;
+    use crate::pending::PendingStore;
+    use crate::recovery::SubmissionKind;
+    use crate::transport_policy::{parse_set_cookie, CookieTransition};
+    fn session() -> PortalSession {
+        PortalSession::parse(&serde_json::json!({
+            "authenticated":true,
+            "recovery":{"version":1,"entryId":"a".repeat(64),
+                "sessionMarker":"b".repeat(64)},
+            "topics":[{"key":"topic_a"}],"selectedTopic":"topic_a"
+        }).to_string()).unwrap()
+    }
+    fn cookie() -> PortalCookie {
+        let origin = HttpsOrigin::parse("https://mobile.example.org").unwrap();
+        let raw = format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=3600",
+            "z".repeat(43));
+        let CookieTransition::Issued(value) = parse_set_cookie(&origin,&origin,&raw).unwrap()
+            else { panic!("synthetic Cookie not issued") };
+        value
+    }
+    #[test]
+    fn post_intent_is_exact_guarded_and_persisted_before_build() {
+        let client = PortalHttpClient::new("https://mobile.example.org").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = PendingStore::open(&dir.path().join("isolated.db")).unwrap();
+        let s = session();
+        let raw = r#"{ "requestId":"test_123", "text":"合成 🧭" }"#;
+        let intent = crate::submission_flow::first_attempt(
+            client.origin().as_str(), &s, &store, "topic_a",
+            SubmissionKind::Message, raw,
+        ).unwrap();
+        let req = client.submission_request(&cookie(), &intent).unwrap();
+        assert_eq!(req.method(),Method::POST);
+        assert_eq!(req.url().as_str(),
+            "https://mobile.example.org/mobile/api/conversations/topic_a/messages");
+        assert_eq!(req.headers().get(reqwest::header::ORIGIN).unwrap(),
+            "https://mobile.example.org");
+        assert_eq!(req.headers().get("X-NativeSync-Entry-Id").unwrap(),
+            s.entry_id.as_str());
+        assert_eq!(req.headers().get("X-NativeSync-Session-Marker").unwrap(),
+            s.session_marker.as_str());
+        assert!(req.headers().contains_key(COOKIE));
+        assert_eq!(req.headers().get(CONTENT_TYPE).unwrap(),"application/json");
+        assert_eq!(req.body().and_then(reqwest::Body::as_bytes),Some(raw.as_bytes()));
+        assert!(!format!("{intent:?}").contains("合成"));
+        assert!(matches!(
+            crate::submission_flow::first_attempt(client.origin().as_str(),
+                &s, &store, "topic_a", SubmissionKind::Message,raw),
+            Err(crate::submission_flow::FlowError::ReconcileFirst)
+        ));
+        assert_eq!(store.list().unwrap().len(),1);
+    }
+    #[test]
+    fn foreign_origin_cannot_build_or_delete_a_claimed_intent() {
+        let client = PortalHttpClient::new("https://elsewhere.example.org").unwrap();
+        let s = session();
+        let dir = tempfile::tempdir().unwrap();
+        let store = PendingStore::open(&dir.path().join("isolated.db")).unwrap();
+        let plan = crate::submission_flow::first_attempt(
+            "https://mobile.example.org",&s,&store,"topic_a",
+            SubmissionKind::Message,r#"{"requestId":"test_123","text":"synthetic"}"#,
+        ).unwrap();
+        assert!(matches!(client.submission_request(&cookie(),&plan),
+            Err(SubmissionTransportError::PlanOrigin)));
+        assert_eq!(store.list().unwrap().len(),1);
+    }
+}

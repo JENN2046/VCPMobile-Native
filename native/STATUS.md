@@ -61,3 +61,9 @@ Live HEAD d08c76e7ae6d4abb639ada5741b626ede6e80079 CI 40245151245: both Android/
 Verified live commit 11e753e8a9ce4046bd21b9e4bf5835d0165c1142: run40250516435 both jobs SUCCESS, including actual Android 4/4 emulator and iOS 3/3 simulator, Swift/Kotlin host bridges and Rust source tests. That is not live service or device acceptance. Artifact native-ios ID12620309352 contained freshly resolved native/Cargo.lock SHA256 0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465 (52,615 bytes); it is still not tracked, and this commit does not pretend otherwise.
 
 This revision adds an authorized, Cookie-origin-scoped, read-only GET /mobile/api/conversations/:key?after=cursor, with page byte bounds, strict no-redirect/no-proxy origin, exact Topic/JS cursor checks and redacted history Debug. It leaves returned JSON opaque and tagged rather than prematurely materializing or claiming a verified receipt. The two new unit tests and this revision's full CI have **NOT YET PASSED**. No real server request has been performed. M2 remains incomplete, M3–M5 not accepted.
+
+## 2026-10-26 latest verified revision and next POST candidate
+
+Live HEAD `5412314cc55832717131b64aba9666d37c0997fe`, run40255755182: Ubuntu/Android and macOS/iOS jobs both SUCCESS; read-only Topic history GET and both platform simulator suites passed on this SHA. Not a real NativeSync service or device test. The iOS synthetic artifact 12622249545 included exact Cargo.lock (52615 bytes, SHA256 `0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465`). Resolved lock remains untracked, no hand-created substitute.
+
+This new revision implements a separately guarded, once-consumed POST transport for an original SQLite first-attempt claim, plus two synthetic request tests. It has not yet passed its own CI, and is not invoked from SwiftUI/Compose or a real server. M2–M5 remain unfinished.
