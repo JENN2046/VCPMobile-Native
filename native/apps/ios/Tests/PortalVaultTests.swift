@@ -146,7 +146,20 @@ final class PortalVaultTests: XCTestCase {
             .appendingPathComponent(try credentialStorageKey(origin:a))
         XCTAssertEqual(try directory.resourceValues(forKeys:[.isExcludedFromBackupKey]).isExcludedFromBackup,true)
         let attrs = try FileManager.default.attributesOfItem(atPath:directory.appendingPathComponent("pending.sqlite").path)
-        XCTAssertEqual(attrs[.protectionKey] as? FileProtectionType,.complete)
+        let protectionValue = attrs[.protectionKey]
+        // NSDictionary values need not arrive as the Swift typed wrapper.
+        // Normalize the representation, never the required protection class.
+        let protection = (protectionValue as? FileProtectionType)
+            ?? (protectionValue as? String).map { FileProtectionType(rawValue: $0) }
+        let valueType = protectionValue.map { String(reflecting: type(of: $0)) } ?? "missing"
+        let knownProtectionValues = ["NSFileProtectionNone", "NSFileProtectionComplete",
+            "NSFileProtectionCompleteUnlessOpen", "NSFileProtectionCompleteUntilFirstUserAuthentication"]
+        let observedValue = protection.flatMap { knownProtectionValues.contains($0.rawValue) ? $0.rawValue : nil }
+            ?? (protectionValue == nil ? "missing" : "unrecognized")
+        // Bounded OS metadata only: no path, payload, Cookie or unknown value.
+        print("VCP_PENDING_PROTECTION present=\(protectionValue != nil) type=\(valueType) value=\(observedValue)")
+        XCTAssertEqual(protection?.rawValue, FileProtectionType.complete.rawValue,
+            "Complete protection must be present; attribute representation: \(valueType)")
         let fence = try NativeRecoveryFence(expected:expected,topicKey:"topic_a",viewGeneration:2)
         fence.cancel()
         do {
