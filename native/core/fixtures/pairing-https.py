@@ -5,6 +5,7 @@ import http.server
 import json
 from pathlib import Path
 import socket
+import socketserver
 import ssl
 import sys
 
@@ -49,9 +50,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response)
 
-server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+class LoopbackServer(http.server.HTTPServer):
+    def server_bind(self):
+        # HTTPServer normally calls getfqdn() here. A loopback fixture must not
+        # depend on runner reverse-DNS latency before announcing readiness.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "pairing.example.test"
+        self.server_port = self.server_address[1]
+
+server = LoopbackServer(("127.0.0.1", 0), Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain("leaf.pem", "leaf.key")
 server.socket = context.wrap_socket(server.socket, server_side=True)
-Path(ready_file).write_text(str(server.server_port))
+ready = Path(ready_file)
+temporary_ready = ready.with_suffix(".tmp")
+temporary_ready.write_text(str(server.server_port))
+temporary_ready.replace(ready)
 server.serve_forever()
