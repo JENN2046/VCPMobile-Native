@@ -87,3 +87,16 @@ exact scope, overlap with the other owner and remaining source/service/device
 conditions; docs/ANDROID_CHAT_DEVICE_ACCEPTANCE.md is the unexecuted real plan.
 iOS Complete protection: PENDING_REAL_DEVICE_ACCEPTANCE, never passed; original
 assertions/failure evidence retained. No M2/M5 completion or shared/main merge.
+
+
+## Authorized independent Android verification
+
+Jenn authorized publishing this candidate only to
+`codex/android-chat-candidate-20261026`, one Issue #1 coordination comment
+and one Android build/emulator verification round. Its push now starts the
+existing Android workflow job automatically; iOS is NOT RUN for this branch
+push. Original shared-branch/default manual full verification and all iOS
+assertions remain. Android JVM view-state tests are included. The workflow
+change is not a CI PASS; read the exact published SHA/run before reporting a
+result. iOS Complete remains PENDING_REAL_DEVICE_ACCEPTANCE. No shared/main
+update, PR, merge, release, real service/model or device/signing operation.

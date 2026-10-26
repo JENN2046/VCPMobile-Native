@@ -4,8 +4,9 @@ Integrated inputs: shared `286f819875856d2719580b1d576b7c1678d245e1`
 (parent `072adcb`, receipt gate `60226d7`) and this thread's recovery/diagnostic
 branch `e5e5b04aeac1a7ea3b847a9b03d69e006c04c5fc`. Shared run40346817148
 finished both jobs SUCCESS. That is evidence for the shared input, not this
-combined candidate. No push, PR, merge to shared/main, or remote CI is authorized
-for this candidate yet. Existing owner's planned send UI overlaps this work;
+combined candidate. Jenn subsequently authorized one independent-branch push, one Issue #1
+coordination comment and one Android build/emulator verification round. No
+shared/main update, PR, merge, release or production operation is authorized. Existing owner's planned send UI overlaps this work;
 coordinate the exact candidate diff before publishing either implementation.
 
 ## One store, claim and receipt gate
@@ -81,11 +82,15 @@ compile. Exact logs and the final commit belong to the local delivery record.
 
 ## Required real acceptance and next coordination
 
-1. Coordinate ownership with the other active implementer. Approve only a new
-   independent verification branch containing this exact combined commit;
-   never overwrite shared/main. Review CI separately: the unchanged iOS strict
-   protection test is known to fail in the simulator. Do not run another
-   equivalent iOS protection diagnostic or lower its assertion to obtain green.
+1. Publish only `codex/android-chat-candidate-20261026` and coordinate its exact
+   commit in Issue #1 with the other active implementer. Its push triggers the
+   existing workflow's Android job once; the iOS job is explicitly NOT RUN for
+   that branch's push. The original shared-branch push still runs both jobs;
+   manual dispatch defaults to both jobs, with an explicit `android_only` choice.
+   All iOS steps/assertions remain unchanged. The Android job also runs the
+   three view-state JVM tests before its existing emulator tests. Do not dispatch
+   another run if the authorized push already created one. A green Android-only
+   run is not dual-platform, actual service, phone or AA acceptance.
 2. Supply the accurate R2.1 materials/isolated service version, a specifically
    approved HTTPS origin, synthetic authorized Topic/account and approved
    nonpaid execution arrangement. No production address, account, Cookie,

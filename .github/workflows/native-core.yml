@@ -1,9 +1,14 @@
 name: Native Apps M1 Verification
 on:
   push:
-    branches: ["codex/native-rust-m0-m1"]
+    branches: ["codex/native-rust-m0-m1", "codex/android-chat-candidate-20261026"]
     paths: ["native/**", ".github/workflows/native-core.yml"]
   workflow_dispatch:
+    inputs:
+      android_only:
+        description: "Verify Android only; iOS is NOT RUN, never passed"
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -34,6 +39,8 @@ jobs:
         run: gradle -p native/tests/kotlin --no-daemon test
       - name: Build Android libraries and Compose application
         run: bash native/scripts/build-android.sh
+      - name: Android view-state JVM tests
+        run: gradle -p native/apps/android --no-daemon :app:testDebugUnitTest
       - name: Enable KVM for the isolated emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -61,8 +68,10 @@ jobs:
             native/target/evidence/*
             native/tests/kotlin/build/test-results/test/*.xml
             native/apps/android/app/build/outputs/apk/debug/*.apk
+            native/apps/android/app/build/test-results/testDebugUnitTest/*.xml
             native/apps/android/app/build/outputs/androidTest-results/connected/**/*.xml
   rust-swift-ios:
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/codex/android-chat-candidate-20261026') && (github.event_name != 'workflow_dispatch' || !inputs.android_only) }}
     runs-on: macos-latest
     timeout-minutes: 35
     steps:
