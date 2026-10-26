@@ -25,18 +25,77 @@ import Foundation
     @Published var historyStatus = "HISTORY_IDLE"
     @Published var pendingRows: [NativePendingPreview] = []
     @Published var pendingStatus = "PENDING_IDLE"
+    @Published var recoveryStatus = "RECOVERY_IDLE"
+    @Published var recoveryActive = false
+    private var recoveryFence: NativeRecoveryFence?
+    private var recoveryTask: Task<Void, Never>?
+
+    func cancelRecovery() {
+        guard let fence = recoveryFence else { return }
+        fence.cancel() // Synchronous barrier before changing view or Topic.
+        recoveryFence = nil; recoveryActive = false
+        recoveryTask?.cancel(); recoveryTask = nil
+        viewGeneration &+= 1; busy = false; recoveryStatus = "RECOVERY_CANCELLED"
+    }
+    func recoverPending() {
+        guard !busy, status == "SESSION_READY", let expected = session,
+              let topic = selectedTopic, topics.contains(topic) else { return }
+        let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generation = viewGeneration
+        let fence: NativeRecoveryFence
+        do { fence = try NativeRecoveryFence(expected: expected, topicKey: topic, viewGeneration: generation) }
+        catch { recoveryStatus = "RECOVERY_REJECTED"; return }
+        recoveryFence = fence; recoveryActive = true; busy = true; recoveryStatus = "RECOVERY_QUERYING"
+        recoveryTask = Task {
+            defer {
+                if recoveryFence === fence {
+                    recoveryFence = nil; recoveryActive = false; recoveryTask = nil; busy = false
+                }
+            }
+            do {
+                let result = try await vault.recoverPending(target, expected: expected, topic: topic, generation: generation, fence: fence)
+                try Task.checkCancellation()
+                guard recoveryFence === fence, generation == viewGeneration,
+                      target == origin.trimmingCharacters(in: .whitespacesAndNewlines), selectedTopic == topic,
+                      session?.entryId == expected.entryId, session?.sessionMarker == expected.sessionMarker else { return }
+                switch result {
+                case .none: recoveryStatus = "NO_PENDING_ORIGINAL"
+                case .some(.accepted(_, let state)): recoveryStatus = "REQUEST_ACCEPTED · \(state.prefix(80)) · 非AA完成证明"
+                case .some(.sameSessionNoReceipt): recoveryStatus = "NO_RECEIPT · 保留原请求，不自动重发"
+                case .some(.review(_)): recoveryStatus = "REVIEW_REQUIRED · 保留原请求，不自动重发"
+                }
+            } catch {
+                if recoveryFence === fence, generation == viewGeneration {
+                    switch error {
+                    case NativeRecoveryError.Expired, SessionCredentialError.Expired:
+                        recoveryStatus = "RECOVERY_EXPIRED · 原请求保留，请恢复会话"
+                    case NativeRecoveryError.AuthenticationRequired: recoveryStatus = "RECOVERY_AUTH_REQUIRED · 原请求保留"
+                    case NativeRecoveryError.Forbidden: recoveryStatus = "RECOVERY_FORBIDDEN · 原请求保留"
+                    case NativeRecoveryError.ContextChanged, NativeRecoveryError.CredentialRejected:
+                        recoveryStatus = "RECOVERY_CONTEXT_CHANGED · 原请求保留"
+                    case NativeRecoveryError.Cancelled: recoveryStatus = "RECOVERY_CANCELLED"
+                    case PortalVaultError.notPaired: recoveryStatus = "RECOVERY_NOT_PAIRED · 原请求保留"
+                    case PortalVaultError.sessionChanged: recoveryStatus = "RECOVERY_CONTEXT_CHANGED · 原请求保留"
+                    default: recoveryStatus = "RECOVERY_FAILED · 原请求保留"
+                    }
+                }
+            }
+        }
+    }
 
     /// Ephemeral view-only cache. Does not alter protected credentials or pending.
     private func clearHistory(dropSession: Bool = true) {
+        cancelRecovery()
         viewGeneration &+= 1
         if dropSession { session = nil }
         selectedTopic = nil
         historyRows = []; historyCursor = 0; historyHasMore = false
         historyStatus = "HISTORY_IDLE"
         pendingRows = []; pendingStatus = "PENDING_IDLE"
+        recoveryStatus = "RECOVERY_IDLE"
     }
     func selectTopic(_ topic: String) {
-        guard !busy, status == "SESSION_READY", topics.contains(topic), session != nil else { return }
+        guard (!busy || recoveryActive), status == "SESSION_READY", topics.contains(topic), session != nil else { return }
         clearHistory(dropSession: false)
         selectedTopic = topic
         historyStatus = "HISTORY_READY_TO_READ"
@@ -197,11 +256,19 @@ struct ConnectionView: View {
                         ForEach(model.topics, id: \.self) { topic in
                             Button(model.selectedTopic == topic ? "✓ \(topic)" : topic) {
                                 model.selectTopic(topic)
-                            }.disabled(model.busy)
+                            }.disabled(model.busy && !model.recoveryActive)
                         }
                     }
                 }
                 if model.selectedTopic != nil {
+                    Section("待确认提交") {
+                        Button("核对待确认提交（只查询）") { model.recoverPending() }
+                            .accessibilityIdentifier("recoverPending").disabled(model.busy)
+                        Text(model.recoveryStatus).accessibilityIdentifier("recoveryStatus")
+                        if model.recoveryActive {
+                            Button("取消核对") { model.cancelRecovery() }.accessibilityIdentifier("cancelRecovery")
+                        }
+                    }
                     Section("话题历史（只读）") {
                         Text(model.historyStatus).accessibilityIdentifier("historyStatus")
                         Button("从头读取历史") { model.readHistory(restart: true) }
@@ -233,7 +300,7 @@ struct ConnectionView: View {
                     Text("只填写你信任的服务入口。配对码仅用于一次请求；不放入日志、聊天历史或普通设置。")
                         .font(.caption)
                 }
-            }.navigationTitle("连接 VCP")
+            }.navigationTitle("连接 VCP").onDisappear { model.cancelRecovery() }
         }
     }
 }

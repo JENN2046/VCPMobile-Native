@@ -13,6 +13,11 @@ import org.junit.runner.RunWith
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.SessionCredential
 import org.vcptoolbox.nativecore.credentialStorageKey
+import org.vcptoolbox.nativecore.NativePendingKind
+import org.vcptoolbox.nativecore.NativeRecoveryFence
+import org.vcptoolbox.nativecore.NativeRecoveryException
+import org.vcptoolbox.nativecore.SessionCredentialException
+import kotlinx.coroutines.delay
 
 @RunWith(AndroidJUnit4::class)
 class PortalVaultTest {
@@ -34,7 +39,12 @@ class PortalVaultTest {
         }
         assertTrue("Expected a redacted vault rejection", rejected)
     }
-    @After fun cleanup(): Unit = runBlocking { vault.remove(a); vault.remove(b); vault.remove("$a:8443") }
+    @After fun cleanup(): Unit = runBlocking {
+        for (origin in listOf(a,b,"$a:8443")) {
+            vault.remove(origin)
+            File(context.noBackupFilesDir,"portal-pending-v1/${credentialStorageKey(origin)}").deleteRecursively()
+        }
+    }
     @Test fun encryptedRoundtripAcrossInstances(): Unit = runBlocking {
         val original = issued(a)
         try {
@@ -105,6 +115,55 @@ class PortalVaultTest {
             assertEquals("NOT_PAIRED", failure.code)
         }
         assertFalse(file(a).exists())
+    }
+
+    @Test fun unpairedRecoveryDoesNotUseNetwork(): Unit = runBlocking {
+        val expected = NativeSessionInfo("a".repeat(64), "b".repeat(64), listOf("topic_a"), null)
+        val fence = NativeRecoveryFence(expected,"topic_a",1uL)
+        try {
+            vault.recoverPending(a,expected,"topic_a",1uL,fence)
+            fail("Unpaired recovery must not reach HTTPS")
+        } catch (failure: PortalVaultException) { assertEquals("NOT_PAIRED",failure.code) }
+        finally { fence.destroy() }
+        assertFalse(file(a).exists())
+    }
+    @Test fun pendingCheckpointSurvivesReopenCancellationAndCredentialRemoval(): Unit = runBlocking {
+        val original = issued(a)
+        try { vault.save(original) } finally { original.destroy() }
+        val expected = NativeSessionInfo("a".repeat(64),"b".repeat(64),listOf("topic_a"),null)
+        val pending = vault.checkpointOriginal(a,expected,"topic_a",NativePendingKind.MESSAGE,
+            "{ \"requestId\":\"native_pending_123\", \"text\":\"synthetic pending\" }")
+        val reopened = PortalSessionVault(context)
+        assertEquals(listOf(pending),reopened.pendingOriginals(a,"topic_a"))
+        val fence = NativeRecoveryFence(expected,"topic_a",2uL)
+        fence.cancel()
+        try {
+            reopened.recoverPending(a,expected,"topic_a",2uL,fence)
+            fail("Cancelled recovery must not reach HTTPS")
+        } catch (_: NativeRecoveryException.Cancelled) {}
+        finally { fence.destroy() }
+        assertEquals(listOf(pending),reopened.pendingOriginals(a,"topic_a"))
+        vault.remove(a)
+        assertEquals(listOf(pending),reopened.pendingOriginals(a,"topic_a"))
+        File(context.noBackupFilesDir,"portal-pending-v1/${credentialStorageKey(a)}").deleteRecursively()
+    }
+    @Test fun expiredRecoveryRetainsCredentialAndPending(): Unit = runBlocking {
+        val original = SessionCredential.fromServerCookie(a,a,
+            "__Secure-vcp_mobile=${"B".repeat(43)}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=5")
+        try { vault.save(original) } finally { original.destroy() }
+        val expected = NativeSessionInfo("a".repeat(64),"b".repeat(64),listOf("topic_a"),null)
+        val pending = vault.checkpointOriginal(a,expected,"topic_a",NativePendingKind.MESSAGE,
+            "{\"requestId\":\"expired_pending_123\",\"text\":\"synthetic\"}")
+        val before = file(a).readBytes()
+        delay(5100)
+        val fence = NativeRecoveryFence(expected,"topic_a",3uL)
+        try {
+            vault.recoverPending(a,expected,"topic_a",3uL,fence)
+            fail("Expired recovery must not reach HTTPS")
+        } catch (_: SessionCredentialException.Expired) {}
+        finally { fence.destroy() }
+        assertArrayEquals(before,file(a).readBytes())
+        assertEquals(listOf(pending),vault.pendingOriginals(a,"topic_a"))
     }
 
 }

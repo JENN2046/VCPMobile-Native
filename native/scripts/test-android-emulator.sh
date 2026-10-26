@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Four original UI, seven secure vault/read guards, and two connection UI contracts.
+# Four original UI, ten secure vault/recovery guards, and two connection UI contracts.
 # Every test is a fresh instrumentation process; timeout always fails.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -26,6 +26,9 @@ tests=(
   PortalVaultTest#missingKeyNeverRegeneratesOrResends
   PortalVaultTest#removalIsOriginScopedAndUnpairedFetchDoesNotUseNetwork
   PortalVaultTest#unpairedHistoryDoesNotUseNetwork
+  PortalVaultTest#unpairedRecoveryDoesNotUseNetwork
+  PortalVaultTest#pendingCheckpointSurvivesReopenCancellationAndCredentialRemoval
+  PortalVaultTest#expiredRecoveryRetainsCredentialAndPending
   ConnectionUiTest#invalidPairingIsLocalAndClearsCode
   ConnectionUiTest#unpairedRestoreDoesNotStartPairing
 )
@@ -48,4 +51,4 @@ for method in "${tests[@]}"; do
   fi
   printf 'PASS %s\n' "$method" | tee -a "$report"
 done
-printf 'PASS all four bridge UI, seven vault/read guards and two connection UI test methods\n' | tee -a "$report"
+printf 'PASS all four bridge UI, ten vault/recovery guards and two connection UI test methods\n' | tee -a "$report"

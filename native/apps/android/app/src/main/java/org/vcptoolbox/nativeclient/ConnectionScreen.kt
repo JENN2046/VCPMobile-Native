@@ -18,10 +18,18 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import java.util.UUID
+import org.vcptoolbox.nativecore.NativeSendException
 import org.json.JSONObject
 import org.vcptoolbox.nativecore.NativeHistoryRow
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.NativePendingPreview
+import org.vcptoolbox.nativecore.NativeRecoveryFence
+import org.vcptoolbox.nativecore.NativeRecoveryOutcome
+import org.vcptoolbox.nativecore.NativeRecoveryException
+import org.vcptoolbox.nativecore.SessionCredentialException
 
 /** Only non-secret origin preference is persisted outside the protected vault. */
 internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
@@ -41,19 +49,182 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     var historyStatus by mutableStateOf("HISTORY_IDLE"); private set
     var pendingRows by mutableStateOf<List<NativePendingPreview>>(emptyList()); private set
     var pendingStatus by mutableStateOf("PENDING_IDLE"); private set
+    var recoveryStatus by mutableStateOf("RECOVERY_IDLE"); private set
+    var recoveryActive by mutableStateOf(false); private set
+    private var recoveryFence: NativeRecoveryFence? = null
+    private var recoveryJob: Job? = null
+    override fun onCleared() {
+        recoveryFence?.cancel()
+        chatFence?.cancel()
+        chatJob?.cancel()
+        super.onCleared()
+    }
+
+    fun cancelRecovery() {
+        val fence = recoveryFence ?: return
+        fence.cancel() // Linearizes before view invalidation or Topic change.
+        recoveryFence = null; recoveryActive = false
+        recoveryJob?.cancel(); recoveryJob = null
+        viewGeneration++; busy = false; recoveryStatus = "RECOVERY_CANCELLED"
+    }
+
+    fun recoverPending() {
+        if (busy || status != "SESSION_READY") return
+        val expected = session ?: return
+        val topic = selectedTopic ?: return
+        if (topic !in topics) return
+        val target = origin.trim()
+        val generation = viewGeneration
+        val fence = try { NativeRecoveryFence(expected, topic, generation.toULong()) }
+            catch (_: Exception) { recoveryStatus = "RECOVERY_REJECTED"; return }
+        recoveryFence = fence; recoveryActive = true; busy = true; recoveryStatus = "RECOVERY_QUERYING"
+        recoveryJob = viewModelScope.launch {
+            try {
+                val result = vault.recoverPending(target, expected, topic, generation.toULong(), fence)
+                if (recoveryFence !== fence || generation != viewGeneration || target != origin.trim() ||
+                    selectedTopic != topic || session?.entryId != expected.entryId || session?.sessionMarker != expected.sessionMarker) return@launch
+                if (result == null || result is NativeRecoveryOutcome.Accepted) {
+                    unresolvedSend = false; pendingRows = emptyList(); pendingStatus = "PENDING_EMPTY"
+                }
+                recoveryStatus = when (result) {
+                    null -> "NO_PENDING_ORIGINAL"
+                    is NativeRecoveryOutcome.Accepted -> "REQUEST_ACCEPTED · ${result.executionState.take(80)} · 非AA完成证明"
+                    is NativeRecoveryOutcome.SameSessionNoReceipt -> "NO_RECEIPT · 保留原请求，不自动重发"
+                    is NativeRecoveryOutcome.Review -> "REVIEW_REQUIRED · 保留原请求，不自动重发"
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (recoveryFence === fence && generation == viewGeneration) recoveryStatus = when (failure) {
+                    is NativeRecoveryException.Expired, is SessionCredentialException.Expired -> "RECOVERY_EXPIRED · 原请求保留，请恢复会话"
+                    is NativeRecoveryException.AuthenticationRequired -> "RECOVERY_AUTH_REQUIRED · 原请求保留"
+                    is NativeRecoveryException.Forbidden -> "RECOVERY_FORBIDDEN · 原请求保留"
+                    is NativeRecoveryException.ContextChanged, is NativeRecoveryException.CredentialRejected -> "RECOVERY_CONTEXT_CHANGED · 原请求保留"
+                    is NativeRecoveryException.Cancelled -> "RECOVERY_CANCELLED"
+                    is PortalVaultException -> if (failure.code == "NOT_PAIRED") "RECOVERY_NOT_PAIRED · 原请求保留" else "RECOVERY_CONTEXT_OR_STORAGE_REJECTED · 原请求保留"
+                    else -> "RECOVERY_FAILED · 原请求保留"
+                }
+            } finally {
+                if (recoveryFence === fence) {
+                    recoveryFence = null; recoveryActive = false; recoveryJob = null; busy = false
+                }
+                fence.destroy()
+            }
+        }
+    }
+
+    var draft by mutableStateOf(""); private set
+    var outgoingText by mutableStateOf(""); private set
+    var sendStatus by mutableStateOf("SEND_IDLE"); private set
+    var replyStatus by mutableStateOf("REPLY_IDLE"); private set
+    var chatActive by mutableStateOf(false); private set
+    private var unresolvedSend = false
+    private var sendingOriginal = false
+    private var historyExecutable = false
+    private var chatFence: NativeRecoveryFence? = null
+    private var chatJob: Job? = null
+    fun updateDraft(value: String) { if (!chatActive && value.length <= 12000) draft = value }
+    val canSend: Boolean get() = !busy && status == "SESSION_READY" && selectedTopic != null &&
+        historyExecutable && !historyHasMore && !unresolvedSend && pendingRows.isEmpty() && draft.isNotBlank()
+    fun stopChat() {
+        chatFence?.cancel()
+        chatJob?.cancel()
+        if (chatActive) {
+            if (sendingOriginal) sendStatus = "STOPPED_CHECK_ORIGINAL"
+            replyStatus = "RECEIVING_STOPPED"
+            chatActive = false; busy = false
+        }
+    }
+    private fun sameChatView(generation: Long, target: String, expected: NativeSessionInfo, topic: String): Boolean =
+        generation == viewGeneration && target == origin.trim() && selectedTopic == topic &&
+            session?.entryId == expected.entryId && session?.sessionMarker == expected.sessionMarker
+    /** Explicit send, then bounded read-only updates through the existing
+     * authorized history route. No invented SSE route or retry of a POST. */
+    fun sendMessage() {
+        if (!canSend) return
+        startChat(sendText = draft)
+    }
+    fun receiveReplies() {
+        if (busy || status != "SESSION_READY" || selectedTopic == null) return
+        startChat(sendText = null)
+    }
+    private fun startChat(sendText: String?) {
+        val expected = session ?: return
+        val topic = selectedTopic ?: return
+        if (topic !in topics) return
+        val target = origin.trim(); val generation = viewGeneration
+        val fence = try { NativeRecoveryFence(expected, topic, generation.toULong()) }
+            catch (_: Exception) { sendStatus = "SEND_CONTEXT_REJECTED"; return }
+        val requestId = if (sendText != null) UUID.randomUUID().toString() else null
+        chatFence = fence; chatActive = true; busy = true
+        sendingOriginal = sendText != null
+        if (sendText != null) { unresolvedSend = true; outgoingText = sendText; draft = ""; sendStatus = "VERIFYING_BEFORE_SEND" }
+        replyStatus = "RECEIVING"
+        chatJob = viewModelScope.launch {
+            try {
+                if (sendText != null && requestId != null) {
+                    val result = vault.sendMessage(target, expected, topic, generation.toULong(), requestId, sendText, fence)
+                    if (!sameChatView(generation, target, expected, topic)) return@launch
+                    sendStatus = result.disposition
+                    // HTTP202 and any failed ACK remain UNKNOWN. Even a
+                    // running receipt is not AA completion; recovery is separate.
+                }
+                repeat(120) {
+                    if (!sameChatView(generation, target, expected, topic)) return@launch
+                    val after = historyCursor
+                    val page = vault.fetchHistory(target, expected, topic, after)
+                    if (!sameChatView(generation, target, expected, topic)) return@launch
+                    if (page.after != after || page.topicKey != topic || page.entryId != expected.entryId ||
+                        page.sessionMarker != expected.sessionMarker) throw PortalVaultException("STALE_HISTORY")
+                    historyRows = mergeHistoryWindow(historyRows, page.rows)
+                    historyCursor = page.nextCursor; historyHasMore = page.hasMore
+                    historyStatus = if (historyRows.isEmpty()) "HISTORY_EMPTY" else "HISTORY_READY"
+                    historyExecutable = JSONObject(page.topicStateJson).optBoolean("historyReady", false) &&
+                        JSONObject(page.topicStateJson).optBoolean("executable", false)
+                    replyStatus = "RECEIVING"
+                    delay(if (page.hasMore) 100L else 2000L)
+                }
+                if (sameChatView(generation, target, expected, topic)) replyStatus = "RECEIVING_PAUSED"
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                if (sameChatView(generation, target, expected, topic)) {
+                    replyStatus = "READ_FAILED_RECONNECT_AND_CHECK_ORIGINAL"
+                    if (sendText != null) sendStatus = when (error) {
+                        is NativeSendException.OutstandingPending -> "PENDING_EXISTS_CHECK_ORIGINAL"
+                        is NativeSendException.InvalidMessage -> "INVALID_MESSAGE_NOT_SENT"
+                        is NativeSendException.ContextChanged -> "SESSION_CHANGED_NOT_SENT"
+                        is NativeSendException.TopicUnauthorized -> "TOPIC_DENIED_NOT_SENT"
+                        else -> "UNKNOWN_CHECK_ORIGINAL"
+                    }
+                }
+            } finally {
+                if (chatFence === fence) {
+                    chatFence = null; chatJob = null
+                    chatActive = false; sendingOriginal = false
+                    if (generation == viewGeneration) busy = false
+                }
+                fence.destroy()
+            }
+        }
+    }
 
     /** Ephemeral view cache only. Never persist content in preferences or logs. */
     private fun clearHistory(dropSession: Boolean = true) {
+        cancelRecovery()
+        stopChat()
         viewGeneration++
         if (dropSession) session = null
         selectedTopic = null
         historyRows = emptyList(); historyCursor = 0uL; historyHasMore = false
         historyStatus = "HISTORY_IDLE"
         pendingRows = emptyList(); pendingStatus = "PENDING_IDLE"
+        recoveryStatus = "RECOVERY_IDLE"
+        draft = ""; outgoingText = ""; sendStatus = "SEND_IDLE"; replyStatus = "REPLY_IDLE"
+        historyExecutable = false
+        unresolvedSend = false; sendingOriginal = false
     }
 
     fun selectTopic(topic: String) {
-        if (busy || status != "SESSION_READY" || topic !in topics || session == null) return
+        if ((busy && !recoveryActive && !chatActive) || status != "SESSION_READY" || topic !in topics || session == null) return
         clearHistory(dropSession = false)
         selectedTopic = topic
         historyStatus = "HISTORY_READY_TO_READ"
@@ -79,16 +250,17 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                 if (generation != viewGeneration || target != origin.trim() ||
                     selectedTopic != topic || session?.entryId != expected.entryId ||
                     session?.sessionMarker != expected.sessionMarker) {
-                    historyStatus = "HISTORY_STALE"
                     return@launch
                 }
                 if (page.after != after || page.topicKey != topic ||
                     page.entryId != expected.entryId || page.sessionMarker != expected.sessionMarker ||
-                    page.rows.any { row -> historyRows.any { it.messageId == row.messageId } }) {
+                    page.rows.any { row -> historyRows.any { it.messageId == row.messageId && it.sequence >= row.sequence } }) {
                     historyStatus = "HISTORY_REJECTED"
                     return@launch
                 }
-                historyRows = (historyRows + page.rows).takeLast(400)
+                historyRows = mergeHistoryWindow(historyRows, page.rows)
+                historyExecutable = JSONObject(page.topicStateJson).optBoolean("historyReady", false) &&
+                    JSONObject(page.topicStateJson).optBoolean("executable", false)
                 historyCursor = page.nextCursor
                 historyHasMore = page.hasMore
                 historyStatus = if (historyRows.isEmpty()) "HISTORY_EMPTY" else "HISTORY_READY"
@@ -117,9 +289,10 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                 if (generation != viewGeneration || target != origin.trim() ||
                     selectedTopic != topic || session?.entryId != expected.entryId ||
                     session?.sessionMarker != expected.sessionMarker) {
-                    pendingStatus = "PENDING_STALE"; return@launch
+                    return@launch
                 }
                 pendingRows = previews
+                unresolvedSend = previews.isNotEmpty()
                 pendingStatus = if (previews.isEmpty()) "PENDING_EMPTY" else "PENDING_UNKNOWN_REVIEW"
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
@@ -148,7 +321,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                 val info = vault.fetchSession(target)
                 session = info; topics = info.topicKeys
                 status = "SESSION_READY"
-                detail = "登录已安全保存，授权话题已读取。当前不发送聊天或任务。"
+                detail = "登录已安全保存。选择授权话题、读取历史后可明确发送一条消息。"
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
                 status = if (saved) "SAVED_SESSION_UNCONFIRMED" else "PAIR_FAILED"
@@ -192,12 +365,13 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
 
 @Composable
 internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
+    DisposableEffect(model) { onDispose { model.stopChat(); model.cancelRecovery() } }
     // Not rememberSaveable: pairing codes must never enter saved instance state.
     var code by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("连接 VCP", style = MaterialTheme.typography.headlineMedium)
-        Text("M2 · 配对与会话恢复；尚不是完整聊天客户端。")
+        Text("选择授权话题后聊天。未知提交先核对原回执，重开不会自动重发。")
         OutlinedTextField(model.origin, model::updateOrigin, enabled = !model.busy,
             label = { Text("HTTPS 入口，不含 /mobile 路径") }, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -217,13 +391,34 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
         if (model.topics.isNotEmpty()) {
             Text("授权话题", style = MaterialTheme.typography.titleMedium)
             model.topics.forEach { topic ->
-                TextButton(onClick = { model.selectTopic(topic) }, enabled = !model.busy,
+                TextButton(onClick = { model.selectTopic(topic) }, enabled = !model.busy || model.recoveryActive || model.chatActive,
                     modifier = Modifier.testTag("historyTopic_$topic")) {
                     Text(if (model.selectedTopic == topic) "✓ $topic" else topic)
                 }
             }
         }
         if (model.selectedTopic != null) {
+            OutlinedButton(onClick = model::recoverPending, enabled = !model.busy,
+                modifier = Modifier.testTag("recoverPending")) { Text("核对待确认提交（只查询）") }
+            Text(model.recoveryStatus, Modifier.testTag("recoveryStatus"))
+            if (model.recoveryActive) {
+                OutlinedButton(onClick = model::cancelRecovery,
+                    modifier = Modifier.testTag("cancelRecovery")) { Text("取消核对") }
+            }
+            Text("消息", style = MaterialTheme.typography.titleMedium)
+            OutlinedTextField(model.draft, model::updateDraft, enabled = !model.busy,
+                label = { Text("消息内容") }, modifier = Modifier.fillMaxWidth().testTag("messageDraft"))
+            Button(onClick = model::sendMessage, enabled = model.canSend,
+                modifier = Modifier.testTag("sendMessage")) { Text("发送并查看回复") }
+            Text(model.sendStatus, Modifier.testTag("sendStatus"))
+            if (model.outgoingText.isNotEmpty()) Text("本次原消息：${model.outgoingText}")
+            OutlinedButton(onClick = model::receiveReplies, enabled = !model.busy,
+                modifier = Modifier.testTag("receiveReplies")) { Text("继续接收回复（只查询）") }
+            if (model.chatActive) OutlinedButton(onClick = model::stopChat,
+                modifier = Modifier.testTag("stopReceiving")) { Text("停止接收") }
+            Text(model.replyStatus, Modifier.testTag("replyStatus"))
+            Text("停止接收不会取消远端任务。发送回包丢失时先核对原回执，不自动重发；受理或运行中不等于AA完成。",
+                style = MaterialTheme.typography.bodySmall)
             Text("话题历史（只读）", style = MaterialTheme.typography.titleMedium)
             Text(model.historyStatus, Modifier.testTag("historyStatus"))
             OutlinedButton(onClick = { model.readHistory(restart = true) }, enabled = !model.busy,

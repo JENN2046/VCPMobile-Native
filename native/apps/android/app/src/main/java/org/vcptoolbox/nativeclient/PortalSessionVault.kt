@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
+import android.os.UserManager
 import java.io.File
 import java.io.FileNotFoundException
 import java.security.KeyStore
@@ -13,12 +14,19 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import org.vcptoolbox.nativecore.NativePendingJournal
+import org.vcptoolbox.nativecore.NativePendingInfo
+import org.vcptoolbox.nativecore.NativePendingKind
+import org.vcptoolbox.nativecore.NativeRecoveryFence
+import org.vcptoolbox.nativecore.NativeRecoveryOutcome
 import org.vcptoolbox.nativecore.PairingAttempt
 import org.vcptoolbox.nativecore.NativeHistoryPage
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.SessionCredential
-import org.vcptoolbox.nativecore.NativePendingJournal
 import org.vcptoolbox.nativecore.NativePendingPreview
+import org.vcptoolbox.nativecore.NativeFirstSendResult
 import org.vcptoolbox.nativecore.credentialStorageKey
 
 /** Fixed error categories; do not leak sensitive system error messages. */
@@ -29,6 +37,7 @@ internal class PortalVaultException(val code: String) : Exception("Session vault
  * Missing/corrupt keys never trigger silent regeneration over an existing record.
  */
 internal class PortalSessionVault(context: Context) {
+    private val appContext = context.applicationContext
     private val directory = File(context.applicationContext.noBackupFilesDir, "portal-session-v1")
     private val pendingDirectory = File(context.applicationContext.noBackupFilesDir, "portal-pending-v1")
     companion object {
@@ -230,10 +239,7 @@ internal class PortalSessionVault(context: Context) {
         }
         try {
             val previews = withContext(Dispatchers.IO) {
-                if (!pendingDirectory.isDirectory && !pendingDirectory.mkdirs()) {
-                    throw PortalVaultException("PENDING_STORE_UNAVAILABLE")
-                }
-                val journal = NativePendingJournal(origin, pendingDirectory.absolutePath)
+                val journal = synchronized(gate) { pendingJournal(origin) }
                 try { journal.listForTopic(snapshot.first, expected, topic) }
                 finally { journal.destroy() }
             }
@@ -243,4 +249,124 @@ internal class PortalSessionVault(context: Context) {
             return previews
         } finally { snapshot.first.destroy() }
     }
+    /** Fixed credential-encrypted, app-private, no-backup storage. No Cookie
+     * enters SQLite. OS file protection is not application-level SQL encryption.
+     */
+    private fun pendingJournal(origin: String): NativePendingJournal {
+        if (appContext.isDeviceProtectedStorage ||
+            !appContext.getSystemService(UserManager::class.java).isUserUnlocked) {
+            throw PortalVaultException("STORAGE_LOCKED")
+        }
+        val id = keyId(origin)
+        val root = File(appContext.noBackupFilesDir, "portal-pending-v1/$id")
+        val sharedFile = File(pendingDirectory, "vcp-pending-v1-$id.sqlite")
+        val previousFile = File(root, "pending.sqlite")
+        // Preserve either earlier layout, but never split a Topic's unknown
+        // submission across journals or silently ignore competing originals.
+        if (sharedFile.exists() || java.nio.file.Files.isSymbolicLink(sharedFile.toPath())) {
+            if (previousFile.exists() || java.nio.file.Files.isSymbolicLink(previousFile.toPath())) {
+                throw PortalVaultException("MULTIPLE_PENDING_STORES_REVIEW")
+            }
+            return NativePendingJournal(origin, pendingDirectory.absolutePath)
+        }
+        if (!root.isDirectory && !root.mkdirs()) throw PortalVaultException("WRITE_FAILED")
+        return NativePendingJournal.open(origin, File(root, "pending.sqlite").absolutePath)
+    }
+
+    /** Deliberate first message only. Network preflight cannot itself claim
+     * dispatch. Reload current secure bytes and claim under the same gate as
+     * credential replacement/removal, with a synchronously revocable view fence.
+     */
+    suspend fun sendMessage(origin: String, expected: NativeSessionInfo, topic: String,
+                            generation: ULong, requestId: String, text: String,
+                            fence: NativeRecoveryFence): NativeFirstSendResult = withContext(Dispatchers.IO) {
+        val id = keyId(origin)
+        val snapshot = synchronized(gate) {
+            val credential = loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED")
+            try { RecoverySnapshot(credential, pendingJournal(origin), epochs[id] ?: 0L, null) }
+            catch (failure: Exception) { credential.destroy(); throw failure }
+        }
+        try {
+            val check = withContext(Dispatchers.Default) {
+                snapshot.credential.prepareMessageSend(snapshot.journal, expected, topic, requestId, text, fence)
+            }
+            try {
+                currentCoroutineContext().ensureActive()
+                val ready = synchronized(gate) {
+                    if ((epochs[id] ?: 0L) != snapshot.epoch) throw PortalVaultException("SESSION_CHANGED")
+                    val current = loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED")
+                    try { Pair(current, current.claimMessageSend(snapshot.journal, check, expected, topic, generation)) }
+                    catch (failure: Exception) { current.destroy(); throw failure }
+                }
+                try {
+                    val result = withContext(Dispatchers.Default) { ready.first.dispatchMessageOnce(ready.second) }
+                    currentCoroutineContext().ensureActive()
+                    synchronized(gate) {
+                        if ((epochs[id] ?: 0L) != snapshot.epoch) throw PortalVaultException("SESSION_CHANGED")
+                        (loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED")).destroy()
+                    }
+                    result
+                } finally { ready.second.destroy(); ready.first.destroy() }
+            } finally { check.destroy() }
+        } finally { snapshot.journal.destroy(); snapshot.credential.destroy() }
+    }
+
+    /** Checkpoint for the explicit submission caller, not a dispatch grant.
+     * This batch's UI has no send path; it only queries existing originals.
+     */
+    suspend fun checkpointOriginal(origin: String, expected: NativeSessionInfo, topic: String,
+                                   kind: NativePendingKind, originalJson: String): NativePendingInfo = withContext(Dispatchers.IO) {
+        synchronized(gate) {
+            val credential = loadLocked(origin, keyId(origin)) ?: throw PortalVaultException("NOT_PAIRED")
+            try {
+                val journal = pendingJournal(origin)
+                try { journal.prepareOriginal(expected, topic, kind, originalJson) }
+                finally { journal.destroy() }
+            } finally { credential.destroy() }
+        }
+    }
+    suspend fun pendingOriginals(origin: String, topic: String): List<NativePendingInfo> = withContext(Dispatchers.IO) {
+        synchronized(gate) {
+            val journal = pendingJournal(origin)
+            try { journal.pendingForTopic(topic) } finally { journal.destroy() }
+        }
+    }
+
+    /** One explicit original-receipt query. Reload and consume with no gap in
+     * the SAME vault gate. The Rust fence serializes view cancellation with
+     * cleanup; no UI JSON, Cookie export or implicit resend is accepted.
+     */
+    suspend fun recoverPending(origin: String, expected: NativeSessionInfo, topic: String,
+                               generation: ULong, fence: NativeRecoveryFence): NativeRecoveryOutcome? = withContext(Dispatchers.IO) {
+        val id = keyId(origin)
+        val snapshot = synchronized(gate) {
+            val credential = loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED")
+            try {
+                val journal = pendingJournal(origin)
+                try {
+                    val originals = journal.pendingForTopic(topic).filter { it.entryId == expected.entryId }
+                    if (originals.size > 1) throw PortalVaultException("AMBIGUOUS_PENDING")
+                    RecoverySnapshot(credential, journal, epochs[id] ?: 0L, originals.singleOrNull())
+                } catch (failure: Exception) { journal.destroy(); throw failure }
+            } catch (failure: Exception) { credential.destroy(); throw failure }
+        }
+        try {
+            val original = snapshot.original ?: return@withContext null
+            val check = withContext(Dispatchers.Default) {
+                snapshot.credential.queryPendingRecovery(snapshot.journal, original, fence)
+            }
+            try {
+                currentCoroutineContext().ensureActive()
+                synchronized(gate) {
+                    if ((epochs[id] ?: 0L) != snapshot.epoch) throw PortalVaultException("SESSION_CHANGED")
+                    val current = loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED")
+                    try { current.confirmPendingRecovery(snapshot.journal, check, expected, topic, generation) }
+                    finally { current.destroy() }
+                }
+            } finally { check.destroy() }
+        } finally { snapshot.credential.destroy(); snapshot.journal.destroy() }
+    }
+    private data class RecoverySnapshot(val credential: SessionCredential, val journal: NativePendingJournal,
+                                        val epoch: Long, val original: NativePendingInfo?)
+
 }

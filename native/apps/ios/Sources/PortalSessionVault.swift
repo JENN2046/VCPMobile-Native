@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 
 /// Never expose Keychain status descriptions, response bodies, or Cookie values.
 enum PortalVaultError: Error {
@@ -107,18 +108,77 @@ actor PortalSessionVault {
         let key = try credentialStorageKey(origin: origin)
         guard let credential = try load(origin) else { throw PortalVaultError.notPaired }
         let epoch = epochs[key, default: 0]
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let directory = base.appendingPathComponent("portal-pending-v1", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try (directory as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
-        try FileManager.default.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: directory.path)
-        let journal = try NativePendingJournal(origin: origin, privateDirectory: directory.path)
+        let journal = try pendingJournal(origin)
         let previews = try await journal.listForTopic(
             credential: credential, expected: expected, topicKey: topicKey)
         try Task.checkCancellation()
         guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
         return previews
     }
+    /// Complete file protection and backup exclusion are inherited by the
+    /// SQLite/WAL files. No Cookie is written here; this is OS file protection,
+    /// not a claim of application-level SQL encryption or physical erasure.
+    private func pendingJournal(_ origin: String) throws -> NativePendingJournal {
+        let key = try credentialStorageKey(origin: origin)
+        let namespace = SHA256.hash(data: Data(service.utf8)).map { String(format: "%02x", $0) }.joined()
+        let support = try FileManager.default.url(for: .applicationSupportDirectory,
+            in: .userDomainMask, appropriateFor: nil, create: true)
+        var root = support.appendingPathComponent("portal-pending-v1", isDirectory: true)
+            .appendingPathComponent(namespace, isDirectory: true).appendingPathComponent(key, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.complete])
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: root.path)
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        try root.setResourceValues(values)
+        let previous = root.appendingPathComponent("pending.sqlite")
+        let shared = support.appendingPathComponent("portal-pending-v1", isDirectory: true)
+            .appendingPathComponent("vcp-pending-v1-\(key).sqlite")
+        let hasShared = FileManager.default.fileExists(atPath: shared.path)
+            || (try? FileManager.default.destinationOfSymbolicLink(atPath: shared.path)) != nil
+        let hasPrevious = FileManager.default.fileExists(atPath: previous.path)
+            || (try? FileManager.default.destinationOfSymbolicLink(atPath: previous.path)) != nil
+        if hasShared && hasPrevious {
+            throw PortalVaultError.invalidRecord
+        }
+        let path = hasShared ? shared.path : previous.path
+        if hasShared {
+            var parent = shared.deletingLastPathComponent()
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: parent.path)
+            try parent.setResourceValues(values)
+        }
+        let journal = try NativePendingJournal.open(origin: origin, privatePath: path)
+        for suffix in ["", "-wal", "-shm"] where FileManager.default.fileExists(atPath: path + suffix) {
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: path + suffix)
+        }
+        return journal
+    }
+    /// Storage checkpoint only. No POST, new execution or retry authority.
+    func checkpointOriginal(_ origin: String, expected: NativeSessionInfo, topic: String,
+                            kind: NativePendingKind, originalJson: String) throws -> NativePendingInfo {
+        guard try load(origin) != nil else { throw PortalVaultError.notPaired }
+        return try pendingJournal(origin).prepareOriginal(expected: expected, topicKey: topic, kind: kind, originalJson: originalJson)
+    }
+    func pendingOriginals(_ origin: String, topic: String) throws -> [NativePendingInfo] {
+        try pendingJournal(origin).pendingForTopic(topicKey: topic)
+    }
+    /// Actor epoch, protected credential reload and synchronous token consume
+    /// have no suspension point between them. Rust additionally serializes
+    /// view cancellation with cleanup through the fence's lock.
+    func recoverPending(_ origin: String, expected: NativeSessionInfo, topic: String,
+                        generation: UInt64, fence: NativeRecoveryFence) async throws -> NativeRecoveryOutcome? {
+        let key = try credentialStorageKey(origin: origin)
+        guard let credential = try load(origin) else { throw PortalVaultError.notPaired }
+        let epoch = epochs[key, default: 0]
+        let journal = try pendingJournal(origin)
+        let originals = try journal.pendingForTopic(topicKey: topic).filter { $0.entryId == expected.entryId }
+        guard originals.count <= 1 else { throw PortalVaultError.invalidRecord }
+        guard let original = originals.first else { return nil }
+        let check = try await credential.queryPendingRecovery(journal: journal, pending: original, fence: fence)
+        try Task.checkCancellation()
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        guard let current = try load(origin) else { throw PortalVaultError.notPaired }
+        return try current.confirmPendingRecovery(journal: journal, check: check, expected: expected,
+            topicKey: topic, viewGeneration: generation)
+    }
+
 }

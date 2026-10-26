@@ -3,6 +3,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import kotlin.test.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.nio.file.Files
 
 class BridgeContractTest {
     private class Recorder(private val cancel: (() -> Unit)? = null) : ProbeListener {
@@ -50,5 +51,29 @@ class BridgeContractTest {
             probe.run(ProbeRequest("first", 1u, 0u), Recorder())
             assertFails { probe.run(ProbeRequest("second", 1u, 0u), Recorder()) }
         } finally { probe.destroy() }
+    }
+
+    @Test fun pendingRecoveryReopensAndCancelledQueryDoesNotUseNetwork(): Unit = runBlocking {
+        val root = Files.createTempDirectory("vcp-native-recovery-").toFile()
+        val origin = "https://recovery-binding.example.test"
+        val expected = NativeSessionInfo("a".repeat(64),"b".repeat(64),listOf("topic_a"),null)
+        val journal = NativePendingJournal.open(origin,root.resolve("pending.sqlite").absolutePath)
+        val original = try { journal.prepareOriginal(expected,"topic_a",NativePendingKind.MESSAGE,
+            "{ \"requestId\":\"binding_pending_123\", \"text\":\"synthetic\" }") }
+            finally { journal.destroy() }
+        val reopened = NativePendingJournal.open(origin,root.resolve("pending.sqlite").absolutePath)
+        val credential = SessionCredential.fromServerCookie(origin,origin,
+            "__Secure-vcp_mobile=${"B".repeat(43)}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600")
+        val fence = NativeRecoveryFence(expected,"topic_a",3uL)
+        try {
+            assertEquals(listOf(original),reopened.pendingForTopic("topic_a"))
+            fence.cancel()
+            assertFailsWith<NativeRecoveryException.Cancelled> { credential.queryPendingRecovery(reopened,original,fence) }
+            assertEquals(listOf(original),reopened.pendingForTopic("topic_a"))
+        } finally { fence.destroy(); credential.destroy(); reopened.destroy(); root.deleteRecursively() }
+    }
+    @Test fun recoveryFenceRejectsUnauthorizedTopicLocally() {
+        val expected = NativeSessionInfo("a".repeat(64),"b".repeat(64),listOf("topic_a"),null)
+        assertFailsWith<NativeRecoveryException.Forbidden> { NativeRecoveryFence(expected,"topic_other",1uL) }
     }
 }

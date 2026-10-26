@@ -3,6 +3,7 @@
 //! Construct from a verified same-origin TLS response, never from chat/model input.
 use crate::https_transport::{PortalHttpClient, PortalHttpError};
 use crate::history::NativeHistoryPage;
+use crate::native_recovery::{NativePendingInfo, NativePendingJournal, NativeRecoveryCheck, NativeRecoveryError, NativeRecoveryFence, NativeRecoveryOutcome};
 use crate::portal_contract::PortalSession;
 use crate::submission_flow::HttpsOrigin;
 use crate::transport_policy::{parse_set_cookie, CookieTransition, PortalCookie, TransportPolicyError};
@@ -67,6 +68,28 @@ pub fn credential_storage_key(origin: String) -> Result<String, SessionCredentia
 
 #[uniffi::export(async_runtime = "tokio")]
 impl SessionCredential {
+    /// Fresh authenticated query only. Expiry and current server context are
+    /// rechecked; the original request marker is used only for receipt matching.
+    pub async fn query_pending_recovery(&self, journal: Arc<NativePendingJournal>,
+        pending: NativePendingInfo, fence: Arc<NativeRecoveryFence>,
+    ) -> Result<Arc<NativeRecoveryCheck>, NativeRecoveryError> {
+        self.recovery_valid()?;
+        fence.ensure_active()?;
+        let client = PortalHttpClient::new(self.cookie.origin().as_str()).map_err(|_| NativeRecoveryError::QueryFailed)?;
+        self.recovery_query_with_client(journal, pending, fence, &client).await
+    }
+
+    /// Host MUST reload the current credential and hold its vault lock/actor
+    /// continuously through this call. The view fence is checked atomically
+    /// with receipt consumption, independently of the host's scheduling.
+    pub fn confirm_pending_recovery(&self, journal: Arc<NativePendingJournal>, check: Arc<NativeRecoveryCheck>,
+        expected: NativeSessionInfo, topic_key: String, view_generation: u64,
+    ) -> Result<NativeRecoveryOutcome, NativeRecoveryError> {
+        self.recovery_valid()?;
+        if self.cookie.origin().as_str() != journal.origin { return Err(NativeRecoveryError::CredentialRejected); }
+        check.consume(&journal, &self.recovery_fingerprint(), &expected, &topic_key, view_generation)
+    }
+
     /// Only pass Set-Cookie from a caller-verified same-origin TLS response.
     /// Parsing a protocol shape does not authenticate or pair a device.
     #[uniffi::constructor]
@@ -103,19 +126,7 @@ impl SessionCredential {
         self.ensure_valid_at(now_ms()?)?;
         let client = PortalHttpClient::new(self.cookie.origin().as_str())
             .map_err(|_| SessionCredentialError::RequestFailed)?;
-        let session = client.fetch_session(&self.cookie).await.map_err(|error| match error {
-            PortalHttpError::Timeout => SessionCredentialError::Timeout,
-            PortalHttpError::SessionRejected(TransportPolicyError::AuthenticationRequired) =>
-                SessionCredentialError::AuthenticationRequired,
-            PortalHttpError::SessionRejected(TransportPolicyError::Forbidden) =>
-                SessionCredentialError::Forbidden,
-            _ => SessionCredentialError::RequestFailed,
-        })?;
-        self.ensure_valid_at(now_ms()?)?;
-        Ok(NativeSessionInfo {
-            entry_id: session.entry_id, session_marker: session.session_marker,
-            topic_keys: session.topic_keys, selected_topic: session.selected_topic,
-        })
+        self.session_info_with_client(&client).await
     }
     /// Read one page after rechecking the actual authenticated session. No
     /// POST or automatic pagination; caller applies a page only if its local
@@ -170,6 +181,24 @@ pub(crate) fn now_ms() -> Result<u64, SessionCredentialError> {
     u64::try_from(value).map_err(|_| SessionCredentialError::ClockInvalid)
 }
 impl SessionCredential {
+    pub(crate) async fn session_info_with_client(&self, client: &PortalHttpClient)
+        -> Result<NativeSessionInfo, SessionCredentialError> {
+        self.ensure_valid_at(now_ms()?)?;
+        if client.origin() != self.cookie.origin() { return Err(SessionCredentialError::OriginMismatch); }
+        let session = client.fetch_session(&self.cookie).await.map_err(|error| match error {
+            PortalHttpError::Timeout => SessionCredentialError::Timeout,
+            PortalHttpError::SessionRejected(TransportPolicyError::AuthenticationRequired) =>
+                SessionCredentialError::AuthenticationRequired,
+            PortalHttpError::SessionRejected(TransportPolicyError::Forbidden) =>
+                SessionCredentialError::Forbidden,
+            _ => SessionCredentialError::RequestFailed,
+        })?;
+        self.ensure_valid_at(now_ms()?)?;
+        Ok(NativeSessionInfo {
+            entry_id: session.entry_id, session_marker: session.session_marker,
+            topic_keys: session.topic_keys, selected_topic: session.selected_topic,
+        })
+    }
     /// Only consumes an already durably claimed original intent. Even when
     /// transport fails, the caller MUST retain pending and reconcile by GET.
     /// This is never an implicit retry and returns no body or Cookie.
@@ -178,8 +207,46 @@ impl SessionCredential {
     ) -> Result<crate::transport_policy::SubmissionHttpOutcome, ()> {
         self.ensure_valid_at(now_ms().map_err(|_| ())?).map_err(|_| ())?;
         let client = PortalHttpClient::new(self.cookie.origin().as_str()).map_err(|_| ())?;
+        self.dispatch_claimed_with_client(plan, &client).await
+    }
+    pub(crate) async fn dispatch_claimed_with_client(&self,
+        plan: crate::submission_flow::OutboundSubmission, client: &PortalHttpClient,
+    ) -> Result<crate::transport_policy::SubmissionHttpOutcome, ()> {
+        self.ensure_valid_at(now_ms().map_err(|_| ())?).map_err(|_| ())?;
+        if client.origin() != self.cookie.origin() { return Err(()); }
         client.submit_claimed_once(&self.cookie, plan).await.map_err(|_| ())
     }
+    pub(crate) fn recovery_fingerprint(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"VCPMobile.RecoveryCredential.v1\0");
+        hash.update(self.cookie.origin().as_str().as_bytes());
+        hash.update([0]);
+        hash.update(self.cookie.secret_for_secure_store().as_bytes());
+        hash.update(self.issued_at_ms.to_le_bytes());
+        hash.update(self.expires_at_ms.to_le_bytes());
+        format!("{:x}", hash.finalize())
+    }
+    pub(crate) fn recovery_valid(&self) -> Result<(), NativeRecoveryError> {
+        self.ensure_valid_at(now_ms().map_err(|_| NativeRecoveryError::Expired)?)
+            .map_err(|e| match e { SessionCredentialError::Expired | SessionCredentialError::ClockInvalid => NativeRecoveryError::Expired, _ => NativeRecoveryError::CredentialRejected })
+    }
+    pub(crate) async fn recovery_query_with_client(&self, journal: Arc<NativePendingJournal>,
+        pending: NativePendingInfo, fence: Arc<NativeRecoveryFence>, client: &PortalHttpClient,
+    ) -> Result<Arc<NativeRecoveryCheck>, NativeRecoveryError> {
+        self.recovery_valid()?;
+        fence.ensure_active()?;
+        if self.cookie.origin().as_str() != journal.origin || client.origin().as_str() != journal.origin { return Err(NativeRecoveryError::CredentialRejected); }
+        if pending.topic_key != fence.topic_key || pending.entry_id != fence.expected.entry_id { return Err(NativeRecoveryError::ContextChanged); }
+        let stored = journal.store.get(&pending.key()).map_err(|_| NativeRecoveryError::StorageRejected)?
+            .ok_or(NativeRecoveryError::StorageRejected)?;
+        if stored.submission.topic_id != pending.topic_key { return Err(NativeRecoveryError::ContextChanged); }
+        let ticket = client.query_pending_receipt_expected(&self.cookie, &journal.store, &pending.key(), &fence.expected)
+            .await.map_err(crate::native_recovery::query_error)?;
+        self.recovery_valid()?;
+        fence.ensure_active()?;
+        Ok(NativeRecoveryCheck::new(journal, fence, self.recovery_fingerprint(), ticket))
+    }
+
     /// Internal TLS adapter entry; conservative expiry begins before the POST.
     pub(crate) fn from_pairing_response(origin: &str, header: &str, started: u64)
         -> Result<Arc<Self>, SessionCredentialError>
@@ -348,10 +415,24 @@ pub enum PendingReconcileError {
     History(#[from] crate::history::HistoryError),
     #[error("original request has no durable first-attempt claim")]
     NotClaimed,
+    #[error("receipt gate rejected: {0}")]
+    Receipt(crate::receipt_query::ReceiptQueryError),
     #[error("entry, Topic or authenticated session changed")]
     ContextChanged,
     #[error("invalid execution projection")]
     InvalidReceipts,
+}
+impl From<crate::receipt_query::ReceiptQueryError> for PendingReconcileError {
+    fn from(error: crate::receipt_query::ReceiptQueryError) -> Self {
+        use crate::receipt_query::ReceiptQueryError as E;
+        match error {
+            E::NotClaimed => Self::NotClaimed,
+            E::Store(e) => Self::Store(e),
+            E::History(e) => Self::History(e),
+            E::Flow(crate::submission_flow::FlowError::EntryChanged) => Self::ContextChanged,
+            other => Self::Receipt(other),
+        }
+    }
 }
 impl SessionCredential {
     /// Requires an app-private store isolated to this credential's origin.
@@ -370,51 +451,21 @@ impl SessionCredential {
         }
         let client = PortalHttpClient::new(self.cookie.origin().as_str())
             .map_err(|_| SessionCredentialError::RequestFailed)?;
-        let first = client.fetch_session(&self.cookie).await.map_err(history_http_error)?;
-        if first.entry_id != record.submission.key.endpoint_id
-            || !first.allows(&record.submission.topic_id)
-        {
-            return Err(PendingReconcileError::ContextChanged);
-        }
+        let ticket = client.query_pending_receipt(&self.cookie, store, original_key).await?;
         self.ensure_valid_at(now_ms()?)?;
-        let snapshot = client.fetch_history(
-            &self.cookie, &first, &record.submission.topic_id, 0,
-        ).await.map_err(history_http_error)?;
-        // Explicit second authority read prevents a known stale-session
-        // response from closing pending. It grants no remote task control.
-        let latest = client.fetch_session(&self.cookie).await.map_err(history_http_error)?;
-        if latest.entry_id != first.entry_id
-            || latest.session_marker != first.session_marker
-            || !latest.allows(&record.submission.topic_id)
-        {
-            return Err(PendingReconcileError::ContextChanged);
-        }
-        self.ensure_valid_at(now_ms()?)?;
-        reconcile_verified_page(&latest, store, original_key, &snapshot)
+        Ok(ticket.commit(store)?)
     }
 }
 
 /// Private final gate: page must originate from an authenticated HTTPS GET.
 /// Tests use synthetic snapshots, not a real NativeSync server.
+#[cfg(test)]
 fn reconcile_verified_page(
     session: &PortalSession, store: &crate::pending::PendingStore,
     original_key: &crate::pending::RequestKey,
     snapshot: &crate::https_transport::HistorySnapshot,
 ) -> Result<crate::submission_flow::Reconciliation, PendingReconcileError> {
-    let record = store.get(original_key)?
-        .ok_or(crate::pending::StoreError::NotFound)?;
-    if record.state != crate::pending::PendingState::AwaitingConfirmation {
-        return Err(PendingReconcileError::NotClaimed);
-    }
-    if record.submission.topic_id != snapshot.topic_key {
-        return Err(PendingReconcileError::ContextChanged);
-    }
-    let page = crate::history::NativeHistoryPage::parse(snapshot, session)?;
-    let executions: Value = serde_json::from_str(&page.executions_json)
-        .map_err(|_| PendingReconcileError::InvalidReceipts)?;
-    Ok(crate::submission_flow::reconcile_authenticated_history(
-        session, store, original_key, &executions,
-    )?)
+    Ok(crate::receipt_query::PendingReceiptCheck::inspect_snapshot(session, store, original_key, snapshot)?.commit(store)?)
 }
 
 #[cfg(test)]

@@ -34,5 +34,8 @@ class ConnectionUiTest {
         ui.onNodeWithTag("pairConnection").assertIsEnabled()
         ui.onNodeWithTag("readHistory").assertDoesNotExist()
         ui.onNodeWithTag("inspectPending").assertDoesNotExist()
+        ui.onNodeWithTag("recoverPending").assertDoesNotExist()
+        ui.onNodeWithTag("sendMessage").assertDoesNotExist()
+        ui.onNodeWithTag("receiveReplies").assertDoesNotExist()
     }
 }

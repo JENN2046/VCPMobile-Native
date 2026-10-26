@@ -5,7 +5,6 @@
 use crate::pending::{PendingState, PendingStore, StoreError, SubmissionKind};
 use crate::recovery::SubmissionKind as WireKind;
 use crate::submission_flow::{first_attempt, FlowError, OutboundSubmission};
-use crate::transport_policy::SubmissionHttpOutcome;
 use serde_json::json;
 use crate::session_credential::{credential_storage_key, NativeSessionInfo, SessionCredential};
 use crate::submission_flow::HttpsOrigin;
@@ -53,6 +52,10 @@ pub enum NativeSendError {
     OutstandingPending,
     #[error("app-private pending journal unavailable")]
     StoreUnavailable,
+    #[error("local send cancelled; inspect pending before another send")]
+    Cancelled,
+    #[error("send capability already consumed")]
+    AlreadyConsumed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -66,12 +69,12 @@ pub struct NativePendingPreview {
 
 #[derive(Debug, uniffi::Object)]
 pub struct NativePendingJournal {
-    origin: String,
+    pub(crate) origin: String,
     storage_key: String,
-    store: PendingStore,
+    pub(crate) store: PendingStore,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativePendingJournal {
     /// The mobile host supplies a *trusted* private directory, never a user
     /// selected path. Each canonical HTTPS origin has a distinct SQLite file.
@@ -79,20 +82,25 @@ impl NativePendingJournal {
     pub fn new(origin: String, private_directory: String)
         -> Result<Arc<Self>, PendingJournalError>
     {
-        let canonical = HttpsOrigin::parse(&origin)
-            .map_err(|_| PendingJournalError::InvalidScope)?;
+        let key = credential_storage_key(origin.clone()).map_err(|_| PendingJournalError::InvalidScope)?;
+        Self::open_private_file(origin, PathBuf::from(private_directory).join(format!("vcp-pending-v1-{key}.sqlite")))
+    }
+}
+
+impl NativePendingJournal {
+    /// Both compatible constructors feed this one validated store owner.
+    pub(crate) fn open_private_file(origin: String, location: PathBuf)
+        -> Result<Arc<Self>, PendingJournalError>
+    {
+        let canonical = HttpsOrigin::parse(&origin).map_err(|_| PendingJournalError::InvalidScope)?;
         let storage_key = credential_storage_key(canonical.as_str().to_owned())
             .map_err(|_| PendingJournalError::InvalidScope)?;
-        let root = PathBuf::from(private_directory);
-        if !root.is_absolute() {
-            return Err(PendingJournalError::InvalidScope);
-        }
-        let metadata = fs::symlink_metadata(&root)
-            .map_err(|_| PendingJournalError::StoreUnavailable)?;
+        if !location.is_absolute() { return Err(PendingJournalError::InvalidScope); }
+        let root = location.parent().ok_or(PendingJournalError::InvalidScope)?;
+        let metadata = fs::symlink_metadata(root).map_err(|_| PendingJournalError::StoreUnavailable)?;
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             return Err(PendingJournalError::InvalidScope);
         }
-        let location = root.join(format!("vcp-pending-v1-{storage_key}.sqlite"));
         match fs::symlink_metadata(&location) {
             Ok(existing) if !existing.file_type().is_file() ||
                 existing.file_type().is_symlink() => {
@@ -108,6 +116,10 @@ impl NativePendingJournal {
         Ok(Arc::new(Self { origin: canonical.as_str().to_owned(), storage_key, store }))
     }
 
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl NativePendingJournal {
     /// Explicit one-shot authenticated GET, followed by a bounded local view.
     /// The host must additionally compare its Keychain/Keystore credential epoch
     /// and selected Topic/view generation before displaying these summaries.
@@ -164,14 +176,7 @@ impl NativePendingJournal {
         // This is the sole durable dispatch claim. Failed claim means NO POST.
         let plan = self.claim_original_message(&verified, &topic_key, &request_id, &text)?;
         let outcome = credential.dispatch_claimed_once(plan).await;
-        let disposition = match outcome {
-            Ok(SubmissionHttpOutcome::AcceptedButUnverified) => "HTTP_202_UNVERIFIED",
-            Ok(SubmissionHttpOutcome::SubmissionContextChanged) => "CONTEXT_CHANGED_KEEP_PENDING",
-            Ok(SubmissionHttpOutcome::AuthenticationRequired) => "AUTH_REQUIRED_KEEP_PENDING",
-            Ok(SubmissionHttpOutcome::Forbidden) => "FORBIDDEN_KEEP_PENDING",
-            Ok(SubmissionHttpOutcome::RedirectDenied) => "REDIRECT_REJECTED_KEEP_PENDING",
-            Ok(SubmissionHttpOutcome::UnknownKeepPending) | Err(()) => "UNKNOWN_KEEP_PENDING",
-        };
+        let disposition = crate::native_send::disposition(outcome);
         Ok(NativeFirstSendResult { request_id, disposition: disposition.to_owned() })
     }
 }
@@ -179,7 +184,7 @@ impl NativePendingJournal {
 impl NativePendingJournal {
     /// All payload bytes are persisted locally before claiming any send. A
     /// competing unknown for this entry/Topic prevents creating a new request.
-    fn claim_original_message(
+    pub(crate) fn claim_original_message(
         &self, session: &crate::portal_contract::PortalSession,
         topic: &str, request_id: &str, text: &str,
     ) -> Result<OutboundSubmission, NativeSendError> {
