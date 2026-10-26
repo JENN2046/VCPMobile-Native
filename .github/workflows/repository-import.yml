@@ -1,0 +1,30 @@
+name: One-time native history import
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/repository-import.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: one-time-native-import
+  cancel-in-progress: false
+jobs:
+  import:
+    if: github.repository == 'JENN2046/VCPMobile-Native'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import only reviewed native history to a new staging branch
+        run: python3 docs/migration/import_native_history.py
+      - name: Preserve bounded migration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-migration-${{ github.sha }}
+          path: migration-evidence/*
+          if-no-files-found: warn
+          retention-days: 1
