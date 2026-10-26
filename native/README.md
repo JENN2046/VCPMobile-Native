@@ -6,7 +6,7 @@ SwiftUI (iOS) and Jetpack Compose (Android) share a Rust client core through Uni
 
 - Shared asynchronous bridge, structured errors, progress and cancellation.
 - Bounded SQLite original submissions, source-backed request identity and receipt reconciliation; unknown operations are never silently replayed.
-- Scoped HTTPS session/history reads, typed validated history pages and consumed one-shot submission plans. History reads recheck authenticated context and platform credential epochs. Native message/history UI is not yet connected.
+- Scoped HTTPS session/history reads, typed validated history pages and consumed one-shot submission plans. History reads recheck authenticated context and platform credential epochs. Experimental read-only Topic history view is being wired; it requires its own CI and is not a complete chat UI.
 - Explicit one-use pairing, Keychain/Keystore credential storage, session restore and authorized Topic keys. Save precedes session GET; a failed GET does not cause another pairing POST.
 - Connection controls for local credential removal, clearly separate from remote logout or task cancellation. No request runs on screen launch; no microphone permission or model dispatch is added.
 

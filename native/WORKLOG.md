@@ -27,3 +27,9 @@ Actual NativeSync service pairing, Topic history, message submission/reconciliat
 Reused the previously saved history-read candidate ZIP (SHA256 `2fb1834b2607272e3b8b0598529fe702f1ba823596e974ae430fa21058152a52`) rather than rewriting it. Its exact 10-file patch applied to the verified 5b65ae6 artifact; manifest before/after identities matched. Reviewed the unchanged source-backed history route, whole-page validation, authenticated context check, epoch fencing and no-dispatch boundary. Updated current notes separately.
 
 The candidate adds 11 Rust tests and one unpaired-history guard per platform. Local patch/whitespace/shell and Swift parsing checks are not Rust/mobile test evidence. The new revision requires its own actual CI; no application history screen, live NativeSync acceptance or message execution is claimed. No private installation ZIP, credential, production data, dependency change, main/old-repository write or signing secret is included.
+
+## Read-only history UI candidate after dce262d
+
+`dce262d03f36802e8c66f99953e9605f8fdeea14` / run40299726811: Android/iOS jobs SUCCESS. Local artifact inspection found Rust 92 passed, strict clippy success, Kotlin4, Android13 instrumentation and iOS12 simulator all passed with no failures/skips. Both artifacts' CRC and digest are checked against the Actions metadata. This validates the source-backed read contract and platform preflight; not an actual NativeSync service.
+
+A new unverified UI batch builds on it: manual Topic pick/read, 200-row paging via the existing credential vault, 400-row view-only cache, generation invalidation, safe native text previews and tombstones; execution receipts not rendered as completed, no dispatch or pending cleanup. The UI's own CI must be inspected before marking it passed. The original source ZIP is not published here; standard cloud artifacts are synthetic and bounded. See docs/M2_HISTORY_VIEW.md.

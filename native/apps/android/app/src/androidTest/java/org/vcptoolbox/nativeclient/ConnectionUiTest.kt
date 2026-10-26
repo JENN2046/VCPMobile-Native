@@ -32,5 +32,6 @@ class ConnectionUiTest {
         ui.onNodeWithTag("restoreConnection").performScrollTo().performClick()
         awaitStatus("RESTORE_FAILED")
         ui.onNodeWithTag("pairConnection").assertIsEnabled()
+        ui.onNodeWithTag("readHistory").assertDoesNotExist()
     }
 }

@@ -18,6 +18,9 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import org.json.JSONObject
+import org.vcptoolbox.nativecore.NativeHistoryRow
+import org.vcptoolbox.nativecore.NativeSessionInfo
 
 /** Only non-secret origin preference is persisted outside the protected vault. */
 internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
@@ -28,16 +31,82 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     var detail by mutableStateOf("输入受信任 VCP 的 HTTPS 入口和新配对码。启动不会自动联网。"); private set
     var topics by mutableStateOf<List<String>>(emptyList()); private set
     var busy by mutableStateOf(false); private set
+    private var session: NativeSessionInfo? = null
+    private var viewGeneration = 0L
+    var selectedTopic by mutableStateOf<String?>(null); private set
+    var historyRows by mutableStateOf<List<NativeHistoryRow>>(emptyList()); private set
+    var historyCursor by mutableStateOf(0uL); private set
+    var historyHasMore by mutableStateOf(false); private set
+    var historyStatus by mutableStateOf("HISTORY_IDLE"); private set
+
+    /** Ephemeral view cache only. Never persist content in preferences or logs. */
+    private fun clearHistory(dropSession: Boolean = true) {
+        viewGeneration++
+        if (dropSession) session = null
+        selectedTopic = null
+        historyRows = emptyList(); historyCursor = 0uL; historyHasMore = false
+        historyStatus = "HISTORY_IDLE"
+    }
+
+    fun selectTopic(topic: String) {
+        if (busy || status != "SESSION_READY" || topic !in topics || session == null) return
+        clearHistory(dropSession = false)
+        selectedTopic = topic
+        historyStatus = "HISTORY_READY_TO_READ"
+    }
+
+    /** A deliberate one-page GET; no automatic pagination, POST or task control. */
+    fun readHistory(restart: Boolean = false) {
+        if (busy || status != "SESSION_READY") return
+        val expected = session ?: return
+        val topic = selectedTopic ?: return
+        if (topic !in topics) return
+        if (restart) {
+            clearHistory(dropSession = false)
+            selectedTopic = topic
+        } else if (historyRows.isNotEmpty() && !historyHasMore) return
+        val target = origin.trim()
+        val after = historyCursor
+        val generation = viewGeneration
+        busy = true; historyStatus = "HISTORY_LOADING"
+        viewModelScope.launch {
+            try {
+                val page = vault.fetchHistory(target, expected, topic, after)
+                if (generation != viewGeneration || target != origin.trim() ||
+                    selectedTopic != topic || session?.entryId != expected.entryId ||
+                    session?.sessionMarker != expected.sessionMarker) {
+                    historyStatus = "HISTORY_STALE"
+                    return@launch
+                }
+                if (page.after != after || page.topicKey != topic ||
+                    page.entryId != expected.entryId || page.sessionMarker != expected.sessionMarker ||
+                    page.rows.any { row -> historyRows.any { it.messageId == row.messageId } }) {
+                    historyStatus = "HISTORY_REJECTED"
+                    return@launch
+                }
+                historyRows = (historyRows + page.rows).takeLast(400)
+                historyCursor = page.nextCursor
+                historyHasMore = page.hasMore
+                historyStatus = if (historyRows.isEmpty()) "HISTORY_EMPTY" else "HISTORY_READY"
+                // Execution receipts in page.executionsJson are NOT task completion.
+                // Pending and AA status remain untouched by this read-only view.
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (generation == viewGeneration) historyStatus = "HISTORY_FAILED"
+            } finally { busy = false }
+        }
+    }
 
     fun updateOrigin(value: String) {
         if (busy) return
+        clearHistory()
         origin = value; topics = emptyList(); status = "NOT_CONNECTED"
         detail = "入口已改变，请配对或核对该入口的已保存会话。"
     }
     fun pair(code: String) {
         if (busy) return
         val target = origin.trim()
-        busy = true; topics = emptyList(); status = "PAIRING"
+        busy = true; clearHistory(); topics = emptyList(); status = "PAIRING"
         viewModelScope.launch {
             var saved = false
             try {
@@ -46,7 +115,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                 prefs.edit().putString("origin", target).apply()
                 status = "SAVED_SESSION_UNCONFIRMED"
                 val info = vault.fetchSession(target)
-                topics = info.topicKeys
+                session = info; topics = info.topicKeys
                 status = "SESSION_READY"
                 detail = "登录已安全保存，授权话题已读取。当前不发送聊天或任务。"
             } catch (cancelled: CancellationException) { throw cancelled }
@@ -60,12 +129,12 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     fun restore() {
         if (busy) return
         val target = origin.trim()
-        busy = true; topics = emptyList(); status = "RESTORING"
+        busy = true; clearHistory(); topics = emptyList(); status = "RESTORING"
         viewModelScope.launch {
             try {
                 val info = vault.fetchSession(target)
                 prefs.edit().putString("origin", target).apply()
-                topics = info.topicKeys; status = "SESSION_READY"
+                session = info; topics = info.topicKeys; status = "SESSION_READY"
                 detail = "已从安全存储恢复并向服务端核对会话。没有重复配对或提交任务。"
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
@@ -77,7 +146,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     fun removeLocal() {
         if (busy) return
         val target = origin.trim()
-        busy = true; topics = emptyList()
+        busy = true; clearHistory(); topics = emptyList()
         viewModelScope.launch {
             try {
                 vault.remove(target)
@@ -116,7 +185,27 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
         if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (model.topics.isNotEmpty()) {
             Text("授权话题", style = MaterialTheme.typography.titleMedium)
-            model.topics.forEach { Text(it) }
+            model.topics.forEach { topic ->
+                TextButton(onClick = { model.selectTopic(topic) }, enabled = !model.busy,
+                    modifier = Modifier.testTag("historyTopic_$topic")) {
+                    Text(if (model.selectedTopic == topic) "✓ $topic" else topic)
+                }
+            }
+        }
+        if (model.selectedTopic != null) {
+            Text("话题历史（只读）", style = MaterialTheme.typography.titleMedium)
+            Text(model.historyStatus, Modifier.testTag("historyStatus"))
+            OutlinedButton(onClick = { model.readHistory(restart = true) }, enabled = !model.busy,
+                modifier = Modifier.testTag("readHistory")) { Text("从头读取历史") }
+            model.historyRows.forEach { row ->
+                Text("${row.sequence} · ${historyPreview(row)}")
+            }
+            if (model.historyHasMore) {
+                OutlinedButton(onClick = { model.readHistory() }, enabled = !model.busy,
+                    modifier = Modifier.testTag("nextHistoryPage")) { Text("读取下一页") }
+            }
+            Text("仅内存保留最近400条。任务回执独立核对，不因读取历史而宣布任务完成。",
+                style = MaterialTheme.typography.bodySmall)
         }
         OutlinedButton(onClick = model::removeLocal, enabled = !model.busy,
             modifier = Modifier.testTag("removeConnection")) { Text("移除本机登录") }
@@ -135,4 +224,15 @@ fun NativeRoot() {
         }
         Box(Modifier.weight(1f)) { if (connection) ConnectionScreen() else ProbeScreen() }
     }
+}
+
+/** Native Text never interprets HTML/JSON as markup or executable instructions. */
+private fun historyPreview(row: NativeHistoryRow): String {
+    if (row.deleted) return "[消息已删除]"
+    return try {
+        val objectValue = JSONObject(row.messageJson ?: return "[消息无法预览]")
+        val role = objectValue.optString("role", "消息").take(24)
+        val content = objectValue.opt("content")
+        "$role: ${if (content is String) content.take(400) else "[非纯文本内容]"}"
+    } catch (_: Exception) { "[消息无法预览]" }
 }

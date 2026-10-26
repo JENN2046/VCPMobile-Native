@@ -5,6 +5,7 @@ import Foundation
     @Published var origin = UserDefaults.standard.string(forKey: "portal.origin.v1") ?? "" {
         didSet {
             if origin != oldValue {
+                clearHistory()
                 topics = []; status = "NOT_CONNECTED"
                 detail = "入口已改变，请配对或核对该入口的已保存会话。"
             }
@@ -15,11 +16,75 @@ import Foundation
     @Published var topics: [String] = []
     @Published var busy = false
     private let vault = PortalSessionVault()
+    private var session: NativeSessionInfo?
+    private var viewGeneration: UInt64 = 0
+    @Published var selectedTopic: String?
+    @Published var historyRows: [NativeHistoryRow] = []
+    @Published var historyCursor: UInt64 = 0
+    @Published var historyHasMore = false
+    @Published var historyStatus = "HISTORY_IDLE"
+
+    /// Ephemeral view-only cache. Does not alter protected credentials or pending.
+    private func clearHistory(dropSession: Bool = true) {
+        viewGeneration &+= 1
+        if dropSession { session = nil }
+        selectedTopic = nil
+        historyRows = []; historyCursor = 0; historyHasMore = false
+        historyStatus = "HISTORY_IDLE"
+    }
+    func selectTopic(_ topic: String) {
+        guard !busy, status == "SESSION_READY", topics.contains(topic), session != nil else { return }
+        clearHistory(dropSession: false)
+        selectedTopic = topic
+        historyStatus = "HISTORY_READY_TO_READ"
+    }
+    /// No automatic networking. One authorized GET page per explicit user action.
+    func readHistory(restart: Bool = false) {
+        guard !busy, status == "SESSION_READY", let expected = session,
+              let topic = selectedTopic, topics.contains(topic) else { return }
+        if restart {
+            clearHistory(dropSession: false)
+            selectedTopic = topic
+        } else if !historyRows.isEmpty && !historyHasMore { return }
+        let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+        let after = historyCursor
+        let generation = viewGeneration
+        busy = true; historyStatus = "HISTORY_LOADING"
+        Task {
+            defer { busy = false }
+            do {
+                let page = try await vault.fetchHistory(target, expected: expected, topicKey: topic, after: after)
+                guard generation == viewGeneration, target == origin.trimmingCharacters(in: .whitespacesAndNewlines),
+                      selectedTopic == topic, session?.entryId == expected.entryId,
+                      session?.sessionMarker == expected.sessionMarker else {
+                    historyStatus = "HISTORY_STALE"
+                    return
+                }
+                guard page.after == after, page.topicKey == topic,
+                      page.entryId == expected.entryId, page.sessionMarker == expected.sessionMarker else {
+                    historyStatus = "HISTORY_REJECTED"
+                    return
+                }
+                let seen = Set(historyRows.map(\.messageId))
+                guard !page.rows.contains(where: { seen.contains($0.messageId) }) else {
+                    historyStatus = "HISTORY_REJECTED"
+                    return
+                }
+                historyRows = Array((historyRows + page.rows).suffix(400))
+                historyCursor = page.nextCursor
+                historyHasMore = page.hasMore
+                historyStatus = historyRows.isEmpty ? "HISTORY_EMPTY" : "HISTORY_READY"
+                // Separate execution projection is not proof of AA completion.
+            } catch {
+                if generation == viewGeneration { historyStatus = "HISTORY_FAILED" }
+            }
+        }
+    }
 
     func pair(_ code: String) {
         guard !busy else { return }
         let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
-        busy = true; topics = []; status = "PAIRING"
+        busy = true; clearHistory(); topics = []; status = "PAIRING"
         Task {
             var saved = false
             defer { busy = false }
@@ -29,7 +94,7 @@ import Foundation
                 UserDefaults.standard.set(target, forKey: "portal.origin.v1")
                 status = "SAVED_SESSION_UNCONFIRMED"
                 let info = try await vault.fetchSession(target)
-                topics = info.topicKeys; status = "SESSION_READY"
+                session = info; topics = info.topicKeys; status = "SESSION_READY"
                 detail = "登录已安全保存，授权话题已读取。当前不发送聊天或任务。"
             } catch {
                 status = saved ? "SAVED_SESSION_UNCONFIRMED" : "PAIR_FAILED"
@@ -41,13 +106,13 @@ import Foundation
     func restore() {
         guard !busy else { return }
         let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
-        busy = true; topics = []; status = "RESTORING"
+        busy = true; clearHistory(); topics = []; status = "RESTORING"
         Task {
             defer { busy = false }
             do {
                 let info = try await vault.fetchSession(target)
                 UserDefaults.standard.set(target, forKey: "portal.origin.v1")
-                topics = info.topicKeys; status = "SESSION_READY"
+                session = info; topics = info.topicKeys; status = "SESSION_READY"
                 detail = "已从安全存储恢复并向服务端核对会话。没有重复配对或提交任务。"
             } catch {
                 status = "RESTORE_FAILED"
@@ -58,7 +123,7 @@ import Foundation
     func removeLocal() {
         guard !busy else { return }
         let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
-        busy = true; topics = []
+        busy = true; clearHistory(); topics = []
         Task {
             defer { busy = false }
             do {
@@ -99,7 +164,29 @@ struct ConnectionView: View {
                     if model.busy { ProgressView() }
                 }
                 if !model.topics.isEmpty {
-                    Section("授权话题") { ForEach(model.topics, id: \.self) { Text($0) } }
+                    Section("授权话题") {
+                        ForEach(model.topics, id: \.self) { topic in
+                            Button(model.selectedTopic == topic ? "✓ \(topic)" : topic) {
+                                model.selectTopic(topic)
+                            }.disabled(model.busy)
+                        }
+                    }
+                }
+                if model.selectedTopic != nil {
+                    Section("话题历史（只读）") {
+                        Text(model.historyStatus).accessibilityIdentifier("historyStatus")
+                        Button("从头读取历史") { model.readHistory(restart: true) }
+                            .accessibilityIdentifier("readHistory").disabled(model.busy)
+                        ForEach(model.historyRows, id: \.sequence) { row in
+                            Text("\(row.sequence) · \(historyPreview(row))")
+                        }
+                        if model.historyHasMore {
+                            Button("读取下一页") { model.readHistory() }
+                                .accessibilityIdentifier("nextHistoryPage").disabled(model.busy)
+                        }
+                        Text("仅内存保留最近400条。任务回执独立核对，不因读取历史而宣布任务完成。")
+                            .font(.caption)
+                    }
                 }
                 Section {
                     Button("移除本机登录", role: .destructive) { model.removeLocal() }
@@ -119,4 +206,16 @@ struct NativeRoot: View {
             ConnectionView().tabItem { Label("连接 VCP", systemImage: "network") }
         }
     }
+}
+
+/// Plain SwiftUI Text: never parse untrusted HTML or execute message content.
+private func historyPreview(_ row: NativeHistoryRow) -> String {
+    if row.deleted { return "[消息已删除]" }
+    guard let raw = row.messageJson, let data = raw.data(using: .utf8),
+          let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        return "[消息无法预览]"
+    }
+    let role = String((object["role"] as? String ?? "消息").prefix(24))
+    let content = (object["content"] as? String).map { String($0.prefix(400)) } ?? "[非纯文本内容]"
+    return "\(role): \(content)"
 }
