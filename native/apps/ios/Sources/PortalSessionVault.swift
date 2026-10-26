@@ -100,6 +100,34 @@ actor PortalSessionVault {
     }
 
 
+    /// User-confirmed one-shot original send. Keep the app-private journal after
+    /// all outcomes, including HTTP 202, cancellation or credential epoch drift.
+    /// Never interpret this return as a completed AA/task result.
+    func sendOriginalMessageOnce(_ origin: String, expected: NativeSessionInfo,
+                                 topicKey: String, requestId: String,
+                                 text: String) async throws -> NativeFirstSendResult {
+        let key = try credentialStorageKey(origin: origin)
+        guard let credential = try load(origin) else { throw PortalVaultError.notPaired }
+        let epoch = epochs[key, default: 0]
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = base.appendingPathComponent("portal-pending-v1", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try (directory as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: directory.path)
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        let journal = try NativePendingJournal(origin: origin, privateDirectory: directory.path)
+        let result = try await journal.sendOriginalMessageOnce(
+            credential: credential, expected: expected, topicKey: topicKey,
+            requestId: requestId, text: text)
+        // A replaced session cannot turn an old result into a current success.
+        // The original local pending row is retained even if this check rejects.
+        try Task.checkCancellation()
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        return result
+    }
+
     /// A deliberate read-only local pending inventory; protected credential is
     /// checked against a fresh authenticated server Session. No POST or deletion.
     func listPending(_ origin: String, expected: NativeSessionInfo,

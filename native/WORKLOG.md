@@ -70,3 +70,16 @@ initial native message POST composition with durable per-origin claim and
 response categories that retain pending, plus two offline tests; mobile UI
 and actual isolated NativeSync/ACK-loss acceptance are still pending.
 See docs/M2_NATIVE_FIRST_SEND.md.
+
+## M2 explicit original message UI (2026-10-27; new commit CI not yet verified)
+
+Both native connection screens now offer a manual text draft and double-confirmed
+one-shot original message POST after authorized Topic selection. Protected
+platform credential snapshot and epoch, exact session/Topic/view guards, app-
+private per-origin pending journal and original Rust atomic first-attempt claim
+are reused. HTTP202 and all failures retain UNKNOWN/pending, never AA completion.
+After a send attempt, UI blocks new sends until deliberate authenticated pending
+inventory and still refuses if a pending row remains. No background dispatch or
+implicit retry. Negative unpaired UI tests extended; docs/M2_NATIVE_SEND_UI.md.
+This is source integration awaiting its exact Actions/CI, not real NativeSync
+service, ACK-loss, Android physical device, iPhone or signing acceptance.

@@ -25,6 +25,9 @@ import Foundation
     @Published var historyStatus = "HISTORY_IDLE"
     @Published var pendingRows: [NativePendingPreview] = []
     @Published var pendingStatus = "PENDING_IDLE"
+    @Published var draftText = ""
+    @Published var sendStatus = "SEND_IDLE"
+    @Published var sendReviewRequired = false
 
     /// Ephemeral view-only cache. Does not alter protected credentials or pending.
     private func clearHistory(dropSession: Bool = true) {
@@ -34,6 +37,7 @@ import Foundation
         historyRows = []; historyCursor = 0; historyHasMore = false
         historyStatus = "HISTORY_IDLE"
         pendingRows = []; pendingStatus = "PENDING_IDLE"
+        draftText = ""; sendStatus = "SEND_IDLE"; sendReviewRequired = false
     }
     func selectTopic(_ topic: String) {
         guard !busy, status == "SESSION_READY", topics.contains(topic), session != nil else { return }
@@ -104,8 +108,50 @@ import Foundation
                 }
                 pendingRows = previews
                 pendingStatus = previews.isEmpty ? "PENDING_EMPTY" : "PENDING_UNKNOWN_REVIEW"
+                // An empty authenticated local journal permits a new
+                // deliberate send; it does not confirm server completion.
+                sendReviewRequired = !previews.isEmpty
             } catch {
                 if generation == viewGeneration { pendingStatus = "PENDING_FAILED" }
+            }
+        }
+    }
+
+    /// Invoked only after the native confirmation dialogue. The journal
+    /// persists and atomically consumes one initial dispatch claim.
+    func sendMessage() {
+        guard !busy, !sendReviewRequired, status == "SESSION_READY",
+              let expected = session, let topic = selectedTopic,
+              topics.contains(topic) else { return }
+        let message = draftText
+        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              message.utf16.count <= 4_000 else { return }
+        let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generation = viewGeneration
+        let requestId = UUID().uuidString
+        busy = true; sendStatus = "SEND_CLAIMING_ONCE"
+        // This remains true on errors: the original POST might have run.
+        sendReviewRequired = true
+        Task {
+            defer { busy = false }
+            do {
+                let result = try await vault.sendOriginalMessageOnce(
+                    target, expected: expected, topicKey: topic,
+                    requestId: requestId, text: message)
+                guard generation == viewGeneration,
+                      target == origin.trimmingCharacters(in: .whitespacesAndNewlines),
+                      selectedTopic == topic, session?.entryId == expected.entryId,
+                      session?.sessionMarker == expected.sessionMarker else {
+                    sendStatus = "SEND_STALE_REVIEW_PENDING"; return
+                }
+                draftText = ""
+                sendStatus = result.disposition
+                pendingRows = []; pendingStatus = "PENDING_REVIEW_REQUIRED"
+            } catch {
+                if generation == viewGeneration {
+                    sendStatus = "SEND_UNCERTAIN_REVIEW_PENDING"
+                    pendingStatus = "PENDING_REVIEW_REQUIRED"
+                }
             }
         }
     }
@@ -168,6 +214,7 @@ struct ConnectionView: View {
     @StateObject private var model = ConnectionModel()
     // Ephemeral only: never SceneStorage/AppStorage or a saved-state restoration field.
     @State private var code = ""
+    @State private var confirmingSend = false
     @FocusState private var inputFocused: Bool
     var body: some View {
         NavigationStack {
@@ -216,6 +263,20 @@ struct ConnectionView: View {
                         Text("仅内存保留最近400条。任务回执独立核对，不因读取历史而宣布任务完成。")
                             .font(.caption)
                         Divider()
+                        Text("原始消息（仅手动首次发送）").font(.headline)
+                        TextEditor(text: $model.draftText)
+                            .frame(minHeight: 90)
+                            .accessibilityIdentifier("messageDraft")
+                            .disabled(model.busy || model.sendReviewRequired)
+                        Button("确认后发送一次") { confirmingSend = true }
+                            .accessibilityIdentifier("sendOriginalMessage")
+                            .disabled(model.busy || model.sendReviewRequired ||
+                                model.draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                model.draftText.utf16.count > 4_000)
+                        Text(model.sendStatus).accessibilityIdentifier("sendStatus")
+                        Text("HTTP 202 是待核对，不代表 AA 完成。发送后先核对 pending，不自动重发。")
+                            .font(.caption)
+                        Divider()
                         Button("核对本机待确认清单") { model.inspectPending() }
                             .accessibilityIdentifier("inspectPending").disabled(model.busy)
                         Text(model.pendingStatus).accessibilityIdentifier("pendingStatus")
@@ -234,6 +295,13 @@ struct ConnectionView: View {
                         .font(.caption)
                 }
             }.navigationTitle("连接 VCP")
+                .confirmationDialog("确认原始消息首次提交", isPresented: $confirmingSend,
+                                    titleVisibility: .visible) {
+                    Button("确认发送一次") { model.sendMessage() }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("先在本机保存并只提交一次。断网和 HTTP 202 都不表示执行完成；不允许盲目重新发送。")
+                }
         }
     }
 }

@@ -19,6 +19,7 @@ import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.SessionCredential
 import org.vcptoolbox.nativecore.NativePendingJournal
 import org.vcptoolbox.nativecore.NativePendingPreview
+import org.vcptoolbox.nativecore.NativeFirstSendResult
 import org.vcptoolbox.nativecore.credentialStorageKey
 
 /** Fixed error categories; do not leak sensitive system error messages. */
@@ -211,6 +212,47 @@ internal class PortalSessionVault(context: Context) {
         } finally { snapshot.first.destroy() }
     }
 
+
+    /** Explicit user-confirmed original send. The protected credential snapshot
+     * and local pending claim are scoped to a single origin/Topic. A result
+     * (even HTTP202) is not a confirmed server receipt or AA completion.
+     * Epoch drift may happen after the local claim or POST: callers MUST
+     * review the persisted pending journal, never silently issue another ID.
+     */
+    suspend fun sendOriginalMessageOnce(origin: String, expected: NativeSessionInfo,
+                                        topic: String, requestId: String,
+                                        message: String): NativeFirstSendResult {
+        val id = keyId(origin)
+        val snapshot = withContext(Dispatchers.IO) {
+            synchronized(gate) {
+                try {
+                    Pair(loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED"),
+                         epochs[id] ?: 0L)
+                } catch (failure: PortalVaultException) { throw failure }
+                catch (_: Exception) { throw PortalVaultException("READ_REJECTED") }
+            }
+        }
+        try {
+            val result = withContext(Dispatchers.IO) {
+                if (!pendingDirectory.isDirectory && !pendingDirectory.mkdirs()) {
+                    throw PortalVaultException("PENDING_STORE_UNAVAILABLE")
+                }
+                synchronized(gate) {
+                    if ((epochs[id] ?: 0L) != snapshot.second)
+                        throw PortalVaultException("SESSION_CHANGED")
+                }
+                val journal = NativePendingJournal(origin, pendingDirectory.absolutePath)
+                try {
+                    journal.sendOriginalMessageOnce(snapshot.first, expected, topic, requestId, message)
+                } finally { journal.destroy() }
+            }
+            synchronized(gate) {
+                if ((epochs[id] ?: 0L) != snapshot.second)
+                    throw PortalVaultException("SESSION_CHANGED")
+            }
+            return result
+        } finally { snapshot.first.destroy() }
+    }
 
     /** Explicit authenticated local recovery inventory. A live session GET is
      * required, while original payloads never cross into the UI. No POST/cleanup.

@@ -19,6 +19,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.UUID
 import org.vcptoolbox.nativecore.NativeHistoryRow
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.NativePendingPreview
@@ -41,6 +42,12 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     var historyStatus by mutableStateOf("HISTORY_IDLE"); private set
     var pendingRows by mutableStateOf<List<NativePendingPreview>>(emptyList()); private set
     var pendingStatus by mutableStateOf("PENDING_IDLE"); private set
+    var draftText by mutableStateOf(""); private set
+    var sendStatus by mutableStateOf("SEND_IDLE"); private set
+    var sendReviewRequired by mutableStateOf(false); private set
+    fun setDraft(value: String) {
+        if (!busy && value.length <= 4_000) draftText = value
+    }
 
     /** Ephemeral view cache only. Never persist content in preferences or logs. */
     private fun clearHistory(dropSession: Boolean = true) {
@@ -50,6 +57,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
         historyRows = emptyList(); historyCursor = 0uL; historyHasMore = false
         historyStatus = "HISTORY_IDLE"
         pendingRows = emptyList(); pendingStatus = "PENDING_IDLE"
+        draftText = ""; sendStatus = "SEND_IDLE"; sendReviewRequired = false
     }
 
     fun selectTopic(topic: String) {
@@ -121,9 +129,54 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 pendingRows = previews
                 pendingStatus = if (previews.isEmpty()) "PENDING_EMPTY" else "PENDING_UNKNOWN_REVIEW"
+                // A fresh authenticated, empty local journal permits a NEW
+                // deliberate send, but is not proof of server-side completion.
+                sendReviewRequired = previews.isNotEmpty()
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
                 if (generation == viewGeneration) pendingStatus = "PENDING_FAILED"
+            } finally { busy = false }
+        }
+    }
+
+    /** Called only after a separate visible confirmation. Never on restore,
+     * screen launch, history paging, or pending inventory.
+     */
+    fun sendMessage() {
+        if (busy || sendReviewRequired || status != "SESSION_READY") return
+        val expected = session ?: return
+        val topic = selectedTopic ?: return
+        if (topic !in topics) return
+        val message = draftText
+        if (message.isBlank() || message.length > 4_000) return
+        val target = origin.trim()
+        val generation = viewGeneration
+        val requestId = UUID.randomUUID().toString()
+        busy = true; sendStatus = "SEND_CLAIMING_ONCE"
+        // After entering the one-shot Rust method the initial claim may have
+        // been persisted even if cancellation or networking fails.
+        sendReviewRequired = true
+        viewModelScope.launch {
+            try {
+                val result = vault.sendOriginalMessageOnce(target, expected, topic, requestId, message)
+                if (generation != viewGeneration || target != origin.trim() ||
+                    selectedTopic != topic || session?.entryId != expected.entryId ||
+                    session?.sessionMarker != expected.sessionMarker) {
+                    sendStatus = "SEND_STALE_REVIEW_PENDING"; return@launch
+                }
+                draftText = ""
+                sendStatus = result.disposition
+                pendingRows = emptyList()
+                pendingStatus = "PENDING_REVIEW_REQUIRED"
+            } catch (cancelled: CancellationException) {
+                // Cancellation is not evidence the one-shot POST did not run.
+                sendStatus = "SEND_CANCELLED_REVIEW_PENDING"
+                throw cancelled
+            } catch (_: Exception) {
+                if (generation == viewGeneration) {
+                    sendStatus = "SEND_UNCERTAIN_REVIEW_PENDING"
+                    pendingStatus = "PENDING_REVIEW_REQUIRED"
+                }
             } finally { busy = false }
         }
     }
@@ -194,6 +247,17 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
 internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
     // Not rememberSaveable: pairing codes must never enter saved instance state.
     var code by remember { mutableStateOf("") }
+    var confirmingSend by remember { mutableStateOf(false) }
+    if (confirmingSend) AlertDialog(
+        onDismissRequest = { confirmingSend = false },
+        title = { Text("确认原始消息首次提交") },
+        text = { Text("只提交一次并先保存在本机。网络失败或 HTTP 202 都不代表执行完成；请核对待确认清单，不要反复发送。") },
+        confirmButton = {
+            TextButton(onClick = { confirmingSend = false; model.sendMessage() },
+                modifier = Modifier.testTag("confirmOriginalSend")) { Text("确认发送一次") }
+        },
+        dismissButton = { TextButton(onClick = { confirmingSend = false }) { Text("取消") } }
+    )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("连接 VCP", style = MaterialTheme.typography.headlineMedium)
@@ -236,6 +300,19 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
                     modifier = Modifier.testTag("nextHistoryPage")) { Text("读取下一页") }
             }
             Text("仅内存保留最近400条。任务回执独立核对，不因读取历史而宣布任务完成。",
+                style = MaterialTheme.typography.bodySmall)
+            HorizontalDivider()
+            Text("原始消息（仅手动首次发送）", style = MaterialTheme.typography.titleSmall)
+            OutlinedTextField(model.draftText, model::setDraft,
+                enabled = !model.busy && !model.sendReviewRequired,
+                label = { Text("消息内容，仅本机临时草稿") },
+                minLines = 3, maxLines = 6,
+                modifier = Modifier.fillMaxWidth().testTag("messageDraft"))
+            Button(onClick = { confirmingSend = true },
+                enabled = !model.busy && !model.sendReviewRequired && model.draftText.isNotBlank(),
+                modifier = Modifier.testTag("sendOriginalMessage")) { Text("确认后发送一次") }
+            Text(model.sendStatus, Modifier.testTag("sendStatus"))
+            Text("HTTP 202 是待核对，不表示 AA 完成。提交后须先检查本机 pending；不自动重发。",
                 style = MaterialTheme.typography.bodySmall)
             HorizontalDivider()
             Text("本机待确认请求（只读）", style = MaterialTheme.typography.titleSmall)

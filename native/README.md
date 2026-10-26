@@ -40,3 +40,13 @@ or restore old AA authority. The submission UI, exact receipt closure and
 real NativeSync isolated-service acceptance remain next tasks. Evidence and
 privacy boundaries: `docs/M2_PENDING_JOURNAL.md`. This candidate must pass
 its own CI before claiming a platform build result.
+
+## M2 confirmed message submission screen (new CI pending)
+
+Both native apps expose explicit, modal-confirmed **one initial** text message
+submission through the existing Rust durable pending journal. After an
+attempt, the UI requires manual pending inspection before another submission.
+HTTP 202 does not prove server receipt or AA completion; no automatic resend,
+background polling, real service validation, or task dispatch occurs on launch.
+See `docs/M2_NATIVE_SEND_UI.md`. Build, actual R2.1 service, devices and
+signing are separately verified.
