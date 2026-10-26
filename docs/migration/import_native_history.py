@@ -69,6 +69,9 @@ def import_scope(src: Path, dst: Path, base: str, head: str,
     original_ids = git(src, "rev-list", "--reverse", f"{base}..{head}").decode().splitlines()
     if len(original_ids) != count or git(src, "rev-list", "--min-parents=2", f"{base}..{head}").strip():
         raise RuntimeError("Unexpected source development history")
+    # Git fast-export path validation needs selected paths in a no-checkout clone.
+    # Materialize only the approved paths in this disposable source copy.
+    git(src, "checkout", head, "--", "native", "LICENSE")
     git(src, "branch", "migration-source", head)
     old_marks, new_marks = dst.parent/"old.marks", dst.parent/"new.marks"
     stream = git(src, "fast-export", "--full-tree", "--reencode=no",

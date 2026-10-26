@@ -2,7 +2,7 @@ name: One-time native history import
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/repository-import.yml]
+    paths: [.github/workflows/repository-import.yml, docs/migration/import_native_history.py]
   workflow_dispatch:
 permissions:
   contents: write
