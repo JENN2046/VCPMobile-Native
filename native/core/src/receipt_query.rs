@@ -65,11 +65,40 @@ impl PortalHttpClient {
         store: &PendingStore,
         original_key: &RequestKey,
     ) -> Result<PendingReceiptCheck, ReceiptQueryError> {
+        self.query_pending_receipt_context(cookie, store, original_key, None)
+            .await
+    }
+
+    pub(crate) async fn query_pending_receipt_expected(
+        &self,
+        cookie: &PortalCookie,
+        store: &PendingStore,
+        original_key: &RequestKey,
+        expected: &crate::portal_contract::PortalSession,
+    ) -> Result<PendingReceiptCheck, ReceiptQueryError> {
+        self.query_pending_receipt_context(cookie, store, original_key, Some(expected))
+            .await
+    }
+
+    async fn query_pending_receipt_context(
+        &self,
+        cookie: &PortalCookie,
+        store: &PendingStore,
+        original_key: &RequestKey,
+        expected: Option<&crate::portal_contract::PortalSession>,
+    ) -> Result<PendingReceiptCheck, ReceiptQueryError> {
         let original = store
             .get(original_key)?
             .ok_or(StoreError::NotFound)?
             .submission;
         let session = self.fetch_session(cookie).await?;
+        if expected.is_some_and(|prior| {
+            prior.entry_id != session.entry_id || prior.session_marker != session.session_marker
+        }) {
+            return Err(
+                FlowError::Portal(crate::portal_contract::PortalError::ContextChanged).into(),
+            );
+        }
         if session.entry_id != original.key.endpoint_id {
             return Err(FlowError::EntryChanged.into());
         }

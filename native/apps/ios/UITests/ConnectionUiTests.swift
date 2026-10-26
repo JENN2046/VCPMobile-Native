@@ -31,5 +31,6 @@ final class ConnectionUiTests: XCTestCase {
         expect("RESTORE_FAILED", in: app)
         XCTAssertTrue(app.buttons["pairConnection"].isEnabled)
         XCTAssertFalse(app.buttons["readHistory"].exists)
+        XCTAssertFalse(app.buttons["recoverPending"].exists)
     }
 }

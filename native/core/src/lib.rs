@@ -20,6 +20,7 @@ pub mod session_credential;
 pub mod pairing;
 pub mod history;
 pub mod receipt_query;
+pub mod native_recovery;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum ProbeError {

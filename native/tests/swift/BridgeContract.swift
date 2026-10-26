@@ -65,5 +65,34 @@ func require(_ condition: Bool, _ message: String) throws {
         } catch { duplicateRejected = true }
         try require(duplicateRejected, "completed probe cannot restart")
         print("PASS: Swift one-shot lifecycle")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("vcp-native-recovery-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:root) }
+        let origin = "https://recovery-binding.example.test"
+        let expected = NativeSessionInfo(entryId:String(repeating:"a",count:64),sessionMarker:String(repeating:"b",count:64),
+            topicKeys:["topic_a"],selectedTopic:nil)
+        let path = root.appendingPathComponent("pending.sqlite").path
+        var journal: NativePendingJournal? = try NativePendingJournal.open(origin:origin,privatePath:path)
+        let original = try journal!.prepareOriginal(expected:expected,topicKey:"topic_a",kind:.message,
+            originalJson:"{ \"requestId\":\"binding_pending_123\", \"text\":\"synthetic\" }")
+        journal = nil
+        let reopened = try NativePendingJournal.open(origin:origin,privatePath:path)
+        let credential = try SessionCredential.fromServerCookie(origin:origin,responseOrigin:origin,
+            setCookie:"__Secure-vcp_mobile=\(String(repeating:"B",count:43)); Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600")
+        let fence = try NativeRecoveryFence(expected:expected,topicKey:"topic_a",viewGeneration:3)
+        try require(try reopened.pendingForTopic(topicKey:"topic_a") == [original],"checkpoint reopens across native handles")
+        fence.cancel()
+        var recoveryCancelled = false
+        do { _ = try await credential.queryPendingRecovery(journal:reopened,pending:original,fence:fence) }
+        catch NativeRecoveryError.Cancelled { recoveryCancelled = true }
+        try require(recoveryCancelled,"cancelled recovery must not reach HTTPS")
+        try require(try reopened.pendingForTopic(topicKey:"topic_a") == [original],"cancel retains original")
+        print("PASS: Swift pending reopen and cancelled recovery")
+        var deniedTopic = false
+        do { _ = try NativeRecoveryFence(expected:expected,topicKey:"topic_other",viewGeneration:1) }
+        catch NativeRecoveryError.Forbidden { deniedTopic = true }
+        try require(deniedTopic,"unauthorized recovery Topic is rejected locally")
+        print("PASS: Swift unauthorized recovery Topic")
     }
 }

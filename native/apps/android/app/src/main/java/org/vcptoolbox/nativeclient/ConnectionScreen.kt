@@ -18,9 +18,14 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import org.json.JSONObject
 import org.vcptoolbox.nativecore.NativeHistoryRow
 import org.vcptoolbox.nativecore.NativeSessionInfo
+import org.vcptoolbox.nativecore.NativeRecoveryFence
+import org.vcptoolbox.nativecore.NativeRecoveryOutcome
+import org.vcptoolbox.nativecore.NativeRecoveryException
+import org.vcptoolbox.nativecore.SessionCredentialException
 
 /** Only non-secret origin preference is persisted outside the protected vault. */
 internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
@@ -38,18 +43,77 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     var historyCursor by mutableStateOf(0uL); private set
     var historyHasMore by mutableStateOf(false); private set
     var historyStatus by mutableStateOf("HISTORY_IDLE"); private set
+    var recoveryStatus by mutableStateOf("RECOVERY_IDLE"); private set
+    var recoveryActive by mutableStateOf(false); private set
+    private var recoveryFence: NativeRecoveryFence? = null
+    private var recoveryJob: Job? = null
+    override fun onCleared() {
+        recoveryFence?.cancel()
+        super.onCleared()
+    }
+
+    fun cancelRecovery() {
+        val fence = recoveryFence ?: return
+        fence.cancel() // Linearizes before view invalidation or Topic change.
+        recoveryFence = null; recoveryActive = false
+        recoveryJob?.cancel(); recoveryJob = null
+        viewGeneration++; busy = false; recoveryStatus = "RECOVERY_CANCELLED"
+    }
+
+    fun recoverPending() {
+        if (busy || status != "SESSION_READY") return
+        val expected = session ?: return
+        val topic = selectedTopic ?: return
+        if (topic !in topics) return
+        val target = origin.trim()
+        val generation = viewGeneration
+        val fence = try { NativeRecoveryFence(expected, topic, generation.toULong()) }
+            catch (_: Exception) { recoveryStatus = "RECOVERY_REJECTED"; return }
+        recoveryFence = fence; recoveryActive = true; busy = true; recoveryStatus = "RECOVERY_QUERYING"
+        recoveryJob = viewModelScope.launch {
+            try {
+                val result = vault.recoverPending(target, expected, topic, generation.toULong(), fence)
+                if (recoveryFence !== fence || generation != viewGeneration || target != origin.trim() ||
+                    selectedTopic != topic || session?.entryId != expected.entryId || session?.sessionMarker != expected.sessionMarker) return@launch
+                recoveryStatus = when (result) {
+                    null -> "NO_PENDING_ORIGINAL"
+                    is NativeRecoveryOutcome.Accepted -> "REQUEST_ACCEPTED · ${result.executionState.take(80)} · 非AA完成证明"
+                    is NativeRecoveryOutcome.SameSessionNoReceipt -> "NO_RECEIPT · 保留原请求，不自动重发"
+                    is NativeRecoveryOutcome.Review -> "REVIEW_REQUIRED · 保留原请求，不自动重发"
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (recoveryFence === fence && generation == viewGeneration) recoveryStatus = when (failure) {
+                    is NativeRecoveryException.Expired, is SessionCredentialException.Expired -> "RECOVERY_EXPIRED · 原请求保留，请恢复会话"
+                    is NativeRecoveryException.AuthenticationRequired -> "RECOVERY_AUTH_REQUIRED · 原请求保留"
+                    is NativeRecoveryException.Forbidden -> "RECOVERY_FORBIDDEN · 原请求保留"
+                    is NativeRecoveryException.ContextChanged, is NativeRecoveryException.CredentialRejected -> "RECOVERY_CONTEXT_CHANGED · 原请求保留"
+                    is NativeRecoveryException.Cancelled -> "RECOVERY_CANCELLED"
+                    is PortalVaultException -> if (failure.code == "NOT_PAIRED") "RECOVERY_NOT_PAIRED · 原请求保留" else "RECOVERY_CONTEXT_OR_STORAGE_REJECTED · 原请求保留"
+                    else -> "RECOVERY_FAILED · 原请求保留"
+                }
+            } finally {
+                if (recoveryFence === fence) {
+                    recoveryFence = null; recoveryActive = false; recoveryJob = null; busy = false
+                }
+                fence.destroy()
+            }
+        }
+    }
 
     /** Ephemeral view cache only. Never persist content in preferences or logs. */
     private fun clearHistory(dropSession: Boolean = true) {
+        cancelRecovery()
         viewGeneration++
         if (dropSession) session = null
         selectedTopic = null
         historyRows = emptyList(); historyCursor = 0uL; historyHasMore = false
         historyStatus = "HISTORY_IDLE"
+        recoveryStatus = "RECOVERY_IDLE"
     }
 
     fun selectTopic(topic: String) {
-        if (busy || status != "SESSION_READY" || topic !in topics || session == null) return
+        if ((busy && !recoveryActive) || status != "SESSION_READY" || topic !in topics || session == null) return
         clearHistory(dropSession = false)
         selectedTopic = topic
         historyStatus = "HISTORY_READY_TO_READ"
@@ -161,6 +225,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
 
 @Composable
 internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
+    DisposableEffect(model) { onDispose { model.cancelRecovery() } }
     // Not rememberSaveable: pairing codes must never enter saved instance state.
     var code by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -186,13 +251,20 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
         if (model.topics.isNotEmpty()) {
             Text("授权话题", style = MaterialTheme.typography.titleMedium)
             model.topics.forEach { topic ->
-                TextButton(onClick = { model.selectTopic(topic) }, enabled = !model.busy,
+                TextButton(onClick = { model.selectTopic(topic) }, enabled = !model.busy || model.recoveryActive,
                     modifier = Modifier.testTag("historyTopic_$topic")) {
                     Text(if (model.selectedTopic == topic) "✓ $topic" else topic)
                 }
             }
         }
         if (model.selectedTopic != null) {
+            OutlinedButton(onClick = model::recoverPending, enabled = !model.busy,
+                modifier = Modifier.testTag("recoverPending")) { Text("核对待确认提交（只查询）") }
+            Text(model.recoveryStatus, Modifier.testTag("recoveryStatus"))
+            if (model.recoveryActive) {
+                OutlinedButton(onClick = model::cancelRecovery,
+                    modifier = Modifier.testTag("cancelRecovery")) { Text("取消核对") }
+            }
             Text("话题历史（只读）", style = MaterialTheme.typography.titleMedium)
             Text(model.historyStatus, Modifier.testTag("historyStatus"))
             OutlinedButton(onClick = { model.readHistory(restart = true) }, enabled = !model.busy,

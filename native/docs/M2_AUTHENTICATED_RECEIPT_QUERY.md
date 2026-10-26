@@ -1,5 +1,9 @@
 # Authenticated original-receipt query (local candidate)
 
+This records the original be16729 increment. Its own run40308456032 subsequently
+passed both platforms. The later native bridge/vault/UI extension is documented
+in `M2_NATIVE_RECOVERY_WIRING.md`; current validation is tracked in STATUS.md.
+
 Base: `dce262d03f36802e8c66f99953e9605f8fdeea14`. Work is isolated on
 `codex/cloud-receipt-recovery-20261026`; no shared ref, Issue, PR or remote CI
 was changed. The base's run40299726811 is completed/success. Its earlier

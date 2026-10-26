@@ -365,3 +365,370 @@ async fn missing_original_fails_before_network() {
         Err(ReceiptQueryError::Store(StoreError::NotFound))
     ));
 }
+
+fn native_info(marker: char) -> crate::session_credential::NativeSessionInfo {
+    crate::session_credential::NativeSessionInfo {
+        entry_id: "a".repeat(64),
+        session_marker: marker.to_string().repeat(64),
+        topic_keys: vec!["topic_a".into(), "topic_b".into()],
+        selected_topic: Some("topic_b".into()),
+    }
+}
+fn bridge_credential(
+    origin: &str,
+    age: u32,
+    token: char,
+) -> std::sync::Arc<crate::session_credential::SessionCredential> {
+    crate::session_credential::SessionCredential::from_server_cookie(origin.into(), origin.into(),
+        format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age={age}", token.to_string().repeat(43))).unwrap()
+}
+
+#[tokio::test]
+async fn native_bridge_expiry_context_cancel_and_single_consumption_keep_originals_safe() {
+    use crate::native_recovery::*;
+    use crate::session_credential::SessionCredential;
+    let root = tempfile::tempdir().unwrap();
+    let ca = certificate(root.path());
+    for mode in [
+        "exact",
+        "cross_exact",
+        "absent",
+        "cross_absent",
+        "forbidden",
+        "topic_revoked",
+        "cross_context_changed",
+        "cancel_before",
+        "cancel_after",
+        "stale_generation",
+        "stale_topic",
+        "stale_session",
+        "changed_credential",
+        "wrong_journal",
+        "expired_before",
+        "expired_after",
+        "cancel_race",
+    ] {
+        let server = Server::start(root.path(), mode).await;
+        let path = root.path().join(format!("bridge-{mode}.sqlite"));
+        let journal =
+            NativePendingJournal::open(server.origin.clone(), path.to_str().unwrap().into())
+                .unwrap();
+        let pending = journal
+            .prepare_original(
+                native_info('b'),
+                "topic_a".into(),
+                NativePendingKind::Message,
+                BODY.into(),
+            )
+            .unwrap();
+        let client = PortalHttpClient::loopback_for_test(&server.origin, ca.clone(), server.port);
+        let plan = first_attempt(
+            &server.origin,
+            &original_session(),
+            &journal.store,
+            "topic_a",
+            SubmissionKind::Message,
+            BODY,
+        )
+        .unwrap();
+        assert!(matches!(
+            client
+                .submit_claimed_once(&synthetic_cookie(&server.origin), plan)
+                .await,
+            Err(SubmissionTransportError::Network)
+        ));
+        let credential = bridge_credential(
+            &server.origin,
+            if mode.starts_with("expired_") { 2 } else { 600 },
+            'B',
+        );
+        let secret = credential.secret_bytes_for_vault().unwrap();
+        drop(credential);
+        drop(journal);
+        let credential = SessionCredential::restore(server.origin.clone(), secret).unwrap();
+        let journal =
+            NativePendingJournal::open(server.origin.clone(), path.to_str().unwrap().into())
+                .unwrap();
+        let expected = native_info(if mode == "cross_exact" || mode == "cross_absent" {
+            'c'
+        } else {
+            'b'
+        });
+        let fence = NativeRecoveryFence::new(expected.clone(), "topic_a".into(), 7).unwrap();
+        if mode == "cancel_before" {
+            fence.cancel();
+        }
+        if mode == "expired_before" {
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+        }
+        let query = credential
+            .recovery_query_with_client(journal.clone(), pending, fence.clone(), &client)
+            .await;
+        assert_eq!(
+            journal.pending_for_topic("topic_a".into()).unwrap().len(),
+            1,
+            "query must not consume: {mode}"
+        );
+        let mut accepted = false;
+        if matches!(
+            mode,
+            "forbidden"
+                | "topic_revoked"
+                | "cross_context_changed"
+                | "cancel_before"
+                | "expired_before"
+        ) {
+            let error = query.err().expect("bridge query must reject");
+            assert_eq!(
+                error,
+                match mode {
+                    "forbidden" | "topic_revoked" => NativeRecoveryError::Forbidden,
+                    "cross_context_changed" => NativeRecoveryError::ContextChanged,
+                    "cancel_before" => NativeRecoveryError::Cancelled,
+                    _ => NativeRecoveryError::Expired,
+                },
+                "{mode}"
+            );
+        } else {
+            let check = query.unwrap_or_else(|e| panic!("{mode}: {e}"));
+            if mode == "cancel_race" {
+                let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+                let ready = barrier.clone();
+                let c = credential.clone();
+                let j = journal.clone();
+                let token = check.clone();
+                let context = expected.clone();
+                let commit = std::thread::spawn(move || {
+                    ready.wait();
+                    c.confirm_pending_recovery(j, token, context, "topic_a".into(), 7)
+                });
+                barrier.wait();
+                fence.cancel();
+                match commit.join().unwrap() {
+                    Ok(NativeRecoveryOutcome::Accepted { .. }) => accepted = true,
+                    Err(NativeRecoveryError::Cancelled) => {}
+                    _ => panic!("cancellation must linearize before or after exact cleanup"),
+                }
+                let remaining = journal.pending_for_topic("topic_a".into()).unwrap().len();
+                assert_eq!(remaining, usize::from(!accepted));
+                assert_eq!(
+                    credential
+                        .confirm_pending_recovery(
+                            journal.clone(),
+                            check,
+                            expected,
+                            "topic_a".into(),
+                            7
+                        )
+                        .unwrap_err(),
+                    NativeRecoveryError::Cancelled
+                );
+                assert_eq!(
+                    journal.pending_for_topic("topic_a".into()).unwrap().len(),
+                    remaining,
+                    "no cleanup after cancel returns"
+                );
+                assert_eq!(
+                    server.counts(),
+                    json!({"post":1,"session":1,"history":1,"other":0})
+                );
+                continue;
+            }
+            if mode == "cancel_after" {
+                fence.cancel();
+            }
+            if mode == "expired_after" {
+                tokio::time::sleep(Duration::from_millis(2100)).await;
+            }
+            let mut current = expected.clone();
+            if mode == "stale_session" {
+                current.session_marker = "e".repeat(64);
+            }
+            let topic = if mode == "stale_topic" {
+                "topic_b"
+            } else {
+                "topic_a"
+            };
+            let generation = if mode == "stale_generation" { 8 } else { 7 };
+            let replacement = if mode == "changed_credential" {
+                bridge_credential(&server.origin, 600, 'D')
+            } else {
+                credential.clone()
+            };
+            let target_journal = if mode == "wrong_journal" {
+                NativePendingJournal::open(
+                    server.origin.clone(),
+                    root.path().join("other.sqlite").to_str().unwrap().into(),
+                )
+                .unwrap()
+            } else {
+                journal.clone()
+            };
+            let result = replacement.confirm_pending_recovery(
+                target_journal,
+                check.clone(),
+                current,
+                topic.into(),
+                generation,
+            );
+            match mode {
+                "exact" | "cross_exact" => {
+                    assert_eq!(
+                        result.unwrap(),
+                        NativeRecoveryOutcome::Accepted {
+                            execution_id: "exec_synthetic".into(),
+                            execution_state: "running".into()
+                        }
+                    );
+                    accepted = true;
+                    assert_eq!(
+                        credential
+                            .confirm_pending_recovery(
+                                journal.clone(),
+                                check,
+                                expected,
+                                "topic_a".into(),
+                                7
+                            )
+                            .unwrap_err(),
+                        NativeRecoveryError::AlreadyConsumed
+                    );
+                }
+                "absent" => {
+                    assert_eq!(result.unwrap(), NativeRecoveryOutcome::SameSessionNoReceipt)
+                }
+                "cross_absent" => assert_eq!(
+                    result.unwrap(),
+                    NativeRecoveryOutcome::Review {
+                        reason: "session".into()
+                    }
+                ),
+                _ => assert_eq!(
+                    result.unwrap_err(),
+                    match mode {
+                        "cancel_after" => NativeRecoveryError::Cancelled,
+                        "expired_after" => NativeRecoveryError::Expired,
+                        "changed_credential" | "wrong_journal" =>
+                            NativeRecoveryError::CredentialRejected,
+                        _ => NativeRecoveryError::ContextChanged,
+                    },
+                    "{mode}"
+                ),
+            }
+        }
+        assert_eq!(
+            journal.pending_for_topic("topic_a".into()).unwrap().len(),
+            usize::from(!accepted),
+            "{mode}"
+        );
+        let no_network = matches!(mode, "cancel_before" | "expired_before");
+        let no_history = no_network
+            || matches!(
+                mode,
+                "forbidden" | "topic_revoked" | "cross_context_changed"
+            );
+        assert_eq!(
+            server.counts(),
+            json!({"post":1,"session":usize::from(!no_network),"history":usize::from(!no_history),"other":0}),
+            "{mode}"
+        );
+        println!("native recovery bridge scenario passed: {mode}");
+    }
+}
+
+/// The subprocess exits without destructors AFTER the server accepts the POST
+/// and drops its ACK. The parent reopens the same real SQLite/WAL files and
+/// uses the exported native recovery types; POST count remains exactly one.
+#[test]
+fn native_bridge_abrupt_process_reopen_after_lost_ack_does_not_reexecute() {
+    use crate::native_recovery::*;
+    if let Ok(root) = std::env::var("VCP_RECOVERY_CHILD_ROOT") {
+        let port: u16 = std::env::var("VCP_RECOVERY_CHILD_PORT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let origin = format!("https://recovery.example.test:{port}");
+        let ca =
+            reqwest::Certificate::from_pem(&fs::read(Path::new(&root).join("ca.pem")).unwrap())
+                .unwrap();
+        let journal = NativePendingJournal::open(
+            origin.clone(),
+            Path::new(&root)
+                .join("process.sqlite")
+                .to_str()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        journal
+            .prepare_original(
+                native_info('b'),
+                "topic_a".into(),
+                NativePendingKind::Message,
+                BODY.into(),
+            )
+            .unwrap();
+        let client = PortalHttpClient::loopback_for_test(&origin, ca, port);
+        let plan = first_attempt(
+            &origin,
+            &original_session(),
+            &journal.store,
+            "topic_a",
+            SubmissionKind::Message,
+            BODY,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(matches!(
+            runtime.block_on(client.submit_claimed_once(&synthetic_cookie(&origin), plan)),
+            Err(SubmissionTransportError::Network)
+        ));
+        std::process::exit(0);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let ca = certificate(root.path());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime.block_on(Server::start(root.path(), "exact"));
+    let output = Command::new(std::env::current_exe().unwrap()).args(["--exact","receipt_query::tests::native_bridge_abrupt_process_reopen_after_lost_ack_does_not_reexecute","--nocapture"])
+        .env("VCP_RECOVERY_CHILD_ROOT",root.path()).env("VCP_RECOVERY_CHILD_PORT",server.port.to_string()).output().unwrap();
+    assert!(output.status.success(), "synthetic child dispatch failed");
+    let journal = NativePendingJournal::open(
+        server.origin.clone(),
+        root.path().join("process.sqlite").to_str().unwrap().into(),
+    )
+    .unwrap();
+    let pending = journal
+        .pending_for_topic("topic_a".into())
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        journal.store.get(&pending.key()).unwrap().unwrap().state,
+        PendingState::AwaitingConfirmation
+    );
+    let credential = bridge_credential(&server.origin, 600, 'B');
+    let client = PortalHttpClient::loopback_for_test(&server.origin, ca, server.port);
+    let fence = NativeRecoveryFence::new(native_info('b'), "topic_a".into(), 9).unwrap();
+    let check = runtime
+        .block_on(credential.recovery_query_with_client(journal.clone(), pending, fence, &client))
+        .unwrap();
+    assert!(matches!(
+        credential
+            .confirm_pending_recovery(
+                journal.clone(),
+                check,
+                native_info('b'),
+                "topic_a".into(),
+                9
+            )
+            .unwrap(),
+        NativeRecoveryOutcome::Accepted { .. }
+    ));
+    assert!(journal
+        .pending_for_topic("topic_a".into())
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        server.counts(),
+        json!({"post":1,"session":1,"history":1,"other":0})
+    );
+}

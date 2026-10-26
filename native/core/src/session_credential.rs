@@ -3,6 +3,7 @@
 //! Construct from a verified same-origin TLS response, never from chat/model input.
 use crate::https_transport::{PortalHttpClient, PortalHttpError};
 use crate::history::NativeHistoryPage;
+use crate::native_recovery::{NativePendingInfo, NativePendingJournal, NativeRecoveryCheck, NativeRecoveryError, NativeRecoveryFence, NativeRecoveryOutcome};
 use crate::portal_contract::PortalSession;
 use crate::submission_flow::HttpsOrigin;
 use crate::transport_policy::{parse_set_cookie, CookieTransition, PortalCookie, TransportPolicyError};
@@ -67,6 +68,28 @@ pub fn credential_storage_key(origin: String) -> Result<String, SessionCredentia
 
 #[uniffi::export(async_runtime = "tokio")]
 impl SessionCredential {
+    /// Fresh authenticated query only. Expiry and current server context are
+    /// rechecked; the original request marker is used only for receipt matching.
+    pub async fn query_pending_recovery(&self, journal: Arc<NativePendingJournal>,
+        pending: NativePendingInfo, fence: Arc<NativeRecoveryFence>,
+    ) -> Result<Arc<NativeRecoveryCheck>, NativeRecoveryError> {
+        self.recovery_valid()?;
+        fence.ensure_active()?;
+        let client = PortalHttpClient::new(self.cookie.origin().as_str()).map_err(|_| NativeRecoveryError::QueryFailed)?;
+        self.recovery_query_with_client(journal, pending, fence, &client).await
+    }
+
+    /// Host MUST reload the current credential and hold its vault lock/actor
+    /// continuously through this call. The view fence is checked atomically
+    /// with receipt consumption, independently of the host's scheduling.
+    pub fn confirm_pending_recovery(&self, journal: Arc<NativePendingJournal>, check: Arc<NativeRecoveryCheck>,
+        expected: NativeSessionInfo, topic_key: String, view_generation: u64,
+    ) -> Result<NativeRecoveryOutcome, NativeRecoveryError> {
+        self.recovery_valid()?;
+        if self.cookie.origin() != &journal.origin { return Err(NativeRecoveryError::CredentialRejected); }
+        check.consume(&journal, &self.recovery_fingerprint(), &expected, &topic_key, view_generation)
+    }
+
     /// Only pass Set-Cookie from a caller-verified same-origin TLS response.
     /// Parsing a protocol shape does not authenticate or pair a device.
     #[uniffi::constructor]
@@ -170,6 +193,37 @@ pub(crate) fn now_ms() -> Result<u64, SessionCredentialError> {
     u64::try_from(value).map_err(|_| SessionCredentialError::ClockInvalid)
 }
 impl SessionCredential {
+    fn recovery_fingerprint(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"VCPMobile.RecoveryCredential.v1\0");
+        hash.update(self.cookie.origin().as_str().as_bytes());
+        hash.update([0]);
+        hash.update(self.cookie.secret_for_secure_store().as_bytes());
+        hash.update(self.issued_at_ms.to_le_bytes());
+        hash.update(self.expires_at_ms.to_le_bytes());
+        format!("{:x}", hash.finalize())
+    }
+    fn recovery_valid(&self) -> Result<(), NativeRecoveryError> {
+        self.ensure_valid_at(now_ms().map_err(|_| NativeRecoveryError::Expired)?)
+            .map_err(|e| match e { SessionCredentialError::Expired | SessionCredentialError::ClockInvalid => NativeRecoveryError::Expired, _ => NativeRecoveryError::CredentialRejected })
+    }
+    pub(crate) async fn recovery_query_with_client(&self, journal: Arc<NativePendingJournal>,
+        pending: NativePendingInfo, fence: Arc<NativeRecoveryFence>, client: &PortalHttpClient,
+    ) -> Result<Arc<NativeRecoveryCheck>, NativeRecoveryError> {
+        self.recovery_valid()?;
+        fence.ensure_active()?;
+        if self.cookie.origin() != &journal.origin || client.origin() != &journal.origin { return Err(NativeRecoveryError::CredentialRejected); }
+        if pending.topic_key != fence.topic_key || pending.entry_id != fence.expected.entry_id { return Err(NativeRecoveryError::ContextChanged); }
+        let stored = journal.store.get(&pending.key()).map_err(|_| NativeRecoveryError::StorageRejected)?
+            .ok_or(NativeRecoveryError::StorageRejected)?;
+        if stored.submission.topic_id != pending.topic_key { return Err(NativeRecoveryError::ContextChanged); }
+        let ticket = client.query_pending_receipt_expected(&self.cookie, &journal.store, &pending.key(), &fence.expected)
+            .await.map_err(crate::native_recovery::query_error)?;
+        self.recovery_valid()?;
+        fence.ensure_active()?;
+        Ok(NativeRecoveryCheck::new(journal, fence, self.recovery_fingerprint(), ticket))
+    }
+
     /// Internal TLS adapter entry; conservative expiry begins before the POST.
     pub(crate) fn from_pairing_response(origin: &str, header: &str, started: u64)
         -> Result<Arc<Self>, SessionCredentialError>
