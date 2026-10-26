@@ -14,6 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.vcptoolbox.nativecore.PairingAttempt
+import org.vcptoolbox.nativecore.NativeHistoryPage
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.SessionCredential
 import org.vcptoolbox.nativecore.credentialStorageKey
@@ -182,4 +183,29 @@ internal class PortalSessionVault(context: Context) {
             return result
         } finally { snapshot.first.destroy() }
     }
+    /** Explicit history GET with a protected credential snapshot. View/Topic
+     * generation must also be checked by the caller before displaying a page.
+     */
+    suspend fun fetchHistory(origin: String, expected: NativeSessionInfo,
+                             topicKey: String, after: ULong): NativeHistoryPage {
+        val id = keyId(origin)
+        val snapshot = withContext(Dispatchers.IO) {
+            synchronized(gate) {
+                try {
+                    Pair(loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED"), epochs[id] ?: 0L)
+                } catch (failure: PortalVaultException) { throw failure }
+                catch (_: Exception) { throw PortalVaultException("READ_REJECTED") }
+            }
+        }
+        try {
+            val page = withContext(Dispatchers.Default) {
+                snapshot.first.fetchHistoryPage(expected, topicKey, after)
+            }
+            synchronized(gate) {
+                if ((epochs[id] ?: 0L) != snapshot.second) throw PortalVaultException("SESSION_CHANGED")
+            }
+            return page
+        } finally { snapshot.first.destroy() }
+    }
+
 }

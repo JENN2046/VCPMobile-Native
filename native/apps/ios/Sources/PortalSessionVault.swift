@@ -86,4 +86,17 @@ actor PortalSessionVault {
         guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
         return info
     }
+    /// Explicit read-only history; credential replacement/removal invalidates
+    /// the returned page. UI must additionally fence its selected Topic/view.
+    func fetchHistory(_ origin: String, expected: NativeSessionInfo,
+                      topicKey: String, after: UInt64) async throws -> NativeHistoryPage {
+        let key = try credentialStorageKey(origin: origin)
+        guard let credential = try load(origin) else { throw PortalVaultError.notPaired }
+        let epoch = epochs[key, default: 0]
+        let page = try await credential.fetchHistoryPage(expected: expected, topicKey: topicKey, after: after)
+        try Task.checkCancellation()
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        return page
+    }
+
 }

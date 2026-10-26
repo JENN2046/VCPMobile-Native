@@ -10,6 +10,7 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.SessionCredential
 import org.vcptoolbox.nativecore.credentialStorageKey
 
@@ -95,4 +96,15 @@ class PortalVaultTest {
         rejected { vault.fetchSession(a) }
         rejected { vault.load("http://example.test") }
     }
+    @Test fun unpairedHistoryDoesNotUseNetwork(): Unit = runBlocking {
+        val expected = NativeSessionInfo("a".repeat(64), "b".repeat(64), listOf("topic_a"), null)
+        try {
+            vault.fetchHistory(a, expected, "topic_a", 0uL)
+            fail("Unpaired history must not reach HTTPS")
+        } catch (failure: PortalVaultException) {
+            assertEquals("NOT_PAIRED", failure.code)
+        }
+        assertFalse(file(a).exists())
+    }
+
 }

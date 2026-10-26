@@ -2,6 +2,8 @@
 //! The exported secret bytes are ONLY for Keychain / Keystore-backed storage.
 //! Construct from a verified same-origin TLS response, never from chat/model input.
 use crate::https_transport::{PortalHttpClient, PortalHttpError};
+use crate::history::NativeHistoryPage;
+use crate::portal_contract::PortalSession;
 use crate::submission_flow::HttpsOrigin;
 use crate::transport_policy::{parse_set_cookie, CookieTransition, PortalCookie, TransportPolicyError};
 use serde_json::{json, Value};
@@ -26,6 +28,8 @@ pub enum SessionCredentialError {
     #[error("server denied this session")] Forbidden,
     #[error("HTTPS request timed out")] Timeout,
     #[error("HTTPS session request failed")] RequestFailed,
+    #[error("session context changed; refresh before reading history")] ContextChanged,
+    #[error("history page rejected; cursor unchanged")] HistoryRejected,
 }
 
 /// Non-credential session metadata; never a server authority or execution receipt.
@@ -112,6 +116,48 @@ impl SessionCredential {
             entry_id: session.entry_id, session_marker: session.session_marker,
             topic_keys: session.topic_keys, selected_topic: session.selected_topic,
         })
+    }
+    /// Read one page after rechecking the actual authenticated session. No
+    /// POST or automatic pagination; caller applies a page only if its local
+    /// view/credential epoch still matches. Pending cleanup is separate.
+    pub async fn fetch_history_page(
+        &self, expected: NativeSessionInfo, topic_key: String, after: u64,
+    ) -> Result<NativeHistoryPage, SessionCredentialError> {
+        self.ensure_valid_at(now_ms()?)?;
+        let prior = history_preflight(self.cookie.origin().as_str(), &expected, &topic_key, after)?;
+        let client = PortalHttpClient::new(self.cookie.origin().as_str())
+            .map_err(|_| SessionCredentialError::RequestFailed)?;
+        let current = client.fetch_session(&self.cookie).await.map_err(history_http_error)?;
+        if current.entry_id != prior.entry_id || current.session_marker != prior.session_marker {
+            return Err(SessionCredentialError::ContextChanged);
+        }
+        if !current.allows(&topic_key) { return Err(SessionCredentialError::Forbidden); }
+        self.ensure_valid_at(now_ms()?)?;
+        let snapshot = client.fetch_history(&self.cookie, &current, &topic_key, after)
+            .await.map_err(history_http_error)?;
+        self.ensure_valid_at(now_ms()?)?;
+        NativeHistoryPage::parse(&snapshot, &current).map_err(|_| SessionCredentialError::HistoryRejected)
+    }
+}
+
+fn history_preflight(origin: &str, expected: &NativeSessionInfo, topic_key: &str, after: u64)
+    -> Result<PortalSession, SessionCredentialError>
+{
+    let document = json!({"authenticated":true,
+        "recovery":{"version":1,"entryId":expected.entry_id,"sessionMarker":expected.session_marker},
+        "topics":expected.topic_keys.iter().map(|key| json!({"key":key})).collect::<Vec<_>>(),
+        "selectedTopic":expected.selected_topic});
+    let session = PortalSession::parse(&document.to_string()).map_err(|_| SessionCredentialError::ContextChanged)?;
+    crate::submission_flow::history_request(origin, &session, topic_key, after)
+        .map_err(|_| SessionCredentialError::HistoryRejected)?;
+    Ok(session)
+}
+fn history_http_error(error: PortalHttpError) -> SessionCredentialError {
+    match error {
+        PortalHttpError::Timeout => SessionCredentialError::Timeout,
+        PortalHttpError::SessionRejected(TransportPolicyError::AuthenticationRequired) => SessionCredentialError::AuthenticationRequired,
+        PortalHttpError::SessionRejected(TransportPolicyError::Forbidden) => SessionCredentialError::Forbidden,
+        _ => SessionCredentialError::HistoryRejected,
     }
 }
 
@@ -249,5 +295,27 @@ mod tests {
     #[tokio::test] async fn expired_credential_cannot_start_http() {
         let c=SessionCredential::issue_at(ORIGIN, ORIGIN, &header(), 0).unwrap();
         assert!(matches!(c.fetch_session_info().await, Err(SessionCredentialError::Expired)));
+    }
+}
+
+#[cfg(test)]
+mod history_bridge_tests {
+    use super::*;
+    fn info() -> NativeSessionInfo {
+        NativeSessionInfo { entry_id:"a".repeat(64), session_marker:"b".repeat(64), topic_keys:vec!["topic_a".into()],selected_topic:None }
+    }
+    #[test] fn history_preflight_rejects_invalid_input_before_http() {
+        let origin="https://history.example.test";let mut s=info();
+        assert!(history_preflight(origin,&s,"topic_a",0).is_ok());
+        assert!(history_preflight(origin,&s,"other",0).is_err());
+        assert!(history_preflight(origin,&s,"topic_a",u64::MAX).is_err());
+        s.session_marker="bad".into();
+        assert!(matches!(history_preflight(origin,&s,"topic_a",0),Err(SessionCredentialError::ContextChanged)));
+    }
+    #[tokio::test] async fn expired_credential_cannot_read_history() {
+        let origin="https://history.example.test";
+        let header=format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=1","A".repeat(43));
+        let c=SessionCredential::issue_at(origin,origin,&header,0).unwrap();
+        assert!(matches!(c.fetch_history_page(info(),"topic_a".into(),0).await,Err(SessionCredentialError::Expired)));
     }
 }

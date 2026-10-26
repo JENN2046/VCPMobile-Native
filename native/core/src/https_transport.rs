@@ -143,8 +143,11 @@ impl PortalHttpClient {
         if response.headers().contains_key(SET_COOKIE) {
             return Err(PortalHttpError::UnexpectedCookieChange);
         }
-        if response.status().as_u16() != 200 {
-            return Err(PortalHttpError::InvalidHistory);
+        match response.status().as_u16() {
+            200 => {},
+            401 => return Err(TransportPolicyError::AuthenticationRequired.into()),
+            403 => return Err(TransportPolicyError::Forbidden.into()),
+            _ => return Err(PortalHttpError::InvalidHistory),
         }
         let mime_ok = response.headers().get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())

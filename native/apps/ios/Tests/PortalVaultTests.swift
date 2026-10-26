@@ -95,4 +95,20 @@ final class PortalVaultTests: XCTestCase {
         catch PortalVaultError.notPaired {}
         catch { XCTFail("Unexpected error class") }
     }
+    func testUnpairedHistoryDoesNotUseNetwork() async throws {
+        let name = service(); defer { removeService(name) }
+        let vault = PortalSessionVault(service: name)
+        let expected = NativeSessionInfo(entryId: String(repeating: "a", count: 64),
+            sessionMarker: String(repeating: "b", count: 64), topicKeys: ["topic_a"], selectedTopic: nil)
+        do {
+            _ = try await vault.fetchHistory(a, expected: expected, topicKey: "topic_a", after: 0)
+            XCTFail("Unpaired history must not reach HTTPS")
+        } catch PortalVaultError.notPaired {
+        } catch {
+            XCTFail("Unexpected history preflight error class")
+        }
+        let missing = try await vault.load(a)
+        XCTAssertNil(missing)
+    }
+
 }
