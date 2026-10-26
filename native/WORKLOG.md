@@ -72,3 +72,7 @@ At HEAD `e456769caee2b29bc4c4bd2b28b5233e5d57b9c7`, run `40259009246` concluded 
 Native `Cargo.lock` linked from the verified earlier CI artifact Git blob `9d169cc99f0729d4b011f35835dc79816140fb68` (52,615 bytes; SHA256 `0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465`). Dependency manifests unchanged from its generation. `check.sh` now fails without the lock instead of resolving dependencies silently, and Android/iOS Rust builds use `--locked`. No candidate vault files are included here; the uncommitted Keychain/Keystore ZIP remains available for a *selective* merge after CI, never wholesale overwrite of new POST.
 
 **Status:** Code submitted for its own CI; success/failure must be read from that exact run, not inherited from earlier builds. M1 previous accepted simulator baseline still exists; M2 real server/device acceptance incomplete. No production, main, credentials or private ZIP changed.
+
+## 2026-10-26: selective vault-related header safety slice
+
+Read ac4b9c5 run40266175023: both platform jobs SUCCESS. Applied only source-identical read-only Cookie sensitivity from the saved LOCAL_UNCOMMITTED vault candidate, plus matching sensitivity on newer submit_claimed_once POST headers. Added assertions for GET session/history and POST headers and synthetic debug output. This does not publish or wholesale overwrite the candidate archive, change server Cookie authority, or integrate Android Keystore/iOS Keychain. All new checks need their own CI. Candidate files remain held for further selective merge.

@@ -92,7 +92,8 @@ impl PortalHttpClient {
         let path = "/mobile/api/session";
         let value = cookie.header_for(&self.origin, path)
             .map_err(|_| PortalHttpError::CookieDenied)?;
-        let value = HeaderValue::from_str(&value).map_err(|_| PortalHttpError::CookieDenied)?;
+        let mut value = HeaderValue::from_str(&value).map_err(|_| PortalHttpError::CookieDenied)?;
+        value.set_sensitive(true);
         self.client.request(Method::GET, format!("{}{path}", self.origin.as_str()))
             .header(ACCEPT, HeaderValue::from_static("application/json"))
             .header(COOKIE, value)
@@ -112,8 +113,9 @@ impl PortalHttpClient {
         ).map_err(|_| PortalHttpError::InvalidHistory)?;
         let value = cookie.header_for(&self.origin, &plan.path_and_query)
             .map_err(|_| PortalHttpError::CookieDenied)?;
-        let value = HeaderValue::from_str(&value)
+        let mut value = HeaderValue::from_str(&value)
             .map_err(|_| PortalHttpError::CookieDenied)?;
+        value.set_sensitive(true);
         self.client.request(
             Method::GET, format!("{}{}", self.origin.as_str(), plan.path_and_query),
         )
@@ -233,6 +235,7 @@ mod tests {
         assert_eq!(request.url().as_str(), "https://mobile.example.org/mobile/api/session");
         assert_eq!(request.headers().get(ACCEPT).unwrap(), "application/json");
         let header = request.headers().get(COOKIE).unwrap().to_str().unwrap();
+        assert!(request.headers().get(COOKIE).unwrap().is_sensitive());
         assert!(header.starts_with("__Secure-vcp_mobile="));
         assert_eq!(header.len(), "__Secure-vcp_mobile=".len() + 43);
         assert!(!request.headers().contains_key(reqwest::header::AUTHORIZATION));
@@ -257,6 +260,7 @@ mod tests {
         assert_eq!(request.url().as_str(),
             "https://mobile.example.org/mobile/api/conversations/topic_a?after=42");
         assert!(request.headers().contains_key(COOKIE));
+        assert!(request.headers().get(COOKIE).unwrap().is_sensitive());
         assert!(!request.headers().contains_key(reqwest::header::ORIGIN));
         assert!(request.body().is_none());
         assert!(matches!(client.history_request(&cookie(), &s, "other", 0),
@@ -325,8 +329,9 @@ impl PortalHttpClient {
         }
         let cookie_header = cookie.header_for(&self.origin, plan.path())
             .map_err(|_| SubmissionTransportError::CookieScope)?;
-        let cookie_header = HeaderValue::from_str(&cookie_header)
+        let mut cookie_header = HeaderValue::from_str(&cookie_header)
             .map_err(|_| SubmissionTransportError::CookieScope)?;
+        cookie_header.set_sensitive(true);
         let origin_header = HeaderValue::from_str(plan.origin_header())
             .map_err(|_| SubmissionTransportError::Request)?;
         let mut builder = self.client.request(
@@ -429,6 +434,8 @@ mod submission_transport_tests {
         assert_eq!(req.headers().get("X-NativeSync-Session-Marker").unwrap(),
             s.session_marker.as_str());
         assert!(req.headers().contains_key(COOKIE));
+        assert!(req.headers().get(COOKIE).unwrap().is_sensitive());
+        assert!(!format!("{req:?}").contains(&"z".repeat(43)));
         assert_eq!(req.headers().get(CONTENT_TYPE).unwrap(),"application/json");
         assert_eq!(req.body().and_then(reqwest::Body::as_bytes),Some(raw.as_bytes()));
         assert!(!format!("{intent:?}").contains("合成"));
