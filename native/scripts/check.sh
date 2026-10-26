@@ -6,7 +6,8 @@ rustc --version
 cargo --version
 # Compatible with macOS Bash 3.2: avoid empty arrays under nounset.
 if [[ ! -f Cargo.lock ]]; then
-  cargo generate-lockfile
+  echo "native/Cargo.lock missing: refusing unpinned build" >&2
+  exit 2
 fi
 cargo test --locked --workspace --all-targets 2>&1 | tee target/evidence/rust-tests.log
 cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1 | tee target/evidence/rust-clippy.log

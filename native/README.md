@@ -43,3 +43,6 @@ The next M2 read-only slice adds an authorized raw Topic history GET to `https_t
 ## M2 once-only HTTPS POST candidate
 
 A new explicitly consumed and source-scoped `PortalHttpClient::submit_claimed_once` sends only a persisted first-attempt plan; its response never clears pending or grants task authority. The diagnostic apps do not invoke POST or hold a real Cookie. See `docs/M2_POST_TRANSPORT.md` and exact CI evidence.
+
+
+**Reproducible dependencies:** `native/Cargo.lock` is committed from the exact successful CI-resolved dependency set; CI scripts fail if missing and build with `--locked`. The platform credential-store candidate remains isolated/unverified until selectively merged onto current POST logic.

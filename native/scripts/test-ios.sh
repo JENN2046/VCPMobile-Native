@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+test -f Cargo.lock || { echo "native/Cargo.lock missing" >&2; exit 2; }
 test "$(uname -s)" = Darwin
 xcodebuild -version
 xcodegen --version
 if [ "$(uname -m)" = arm64 ]; then export VCP_RUST_SIM_TARGET=aarch64-apple-ios-sim; else export VCP_RUST_SIM_TARGET=x86_64-apple-ios; fi
 rustup target add "$VCP_RUST_SIM_TARGET" aarch64-apple-ios
 for target in "$VCP_RUST_SIM_TARGET" aarch64-apple-ios; do
-  cargo build --release --lib -p vcp-mobile-native-core --target "$target"
+  cargo build --locked --release --lib -p vcp-mobile-native-core --target "$target"
 done
 xcodegen generate --spec apps/ios/project.yml
 xcrun simctl list devices available --json > target/ios-devices.json

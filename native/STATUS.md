@@ -67,3 +67,11 @@ This revision adds an authorized, Cookie-origin-scoped, read-only GET /mobile/ap
 Live HEAD `5412314cc55832717131b64aba9666d37c0997fe`, run40255755182: Ubuntu/Android and macOS/iOS jobs both SUCCESS; read-only Topic history GET and both platform simulator suites passed on this SHA. Not a real NativeSync service or device test. The iOS synthetic artifact 12622249545 included exact Cargo.lock (52615 bytes, SHA256 `0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465`). Resolved lock remains untracked, no hand-created substitute.
 
 This new revision implements a separately guarded, once-consumed POST transport for an original SQLite first-attempt claim, plus two synthetic request tests. It has not yet passed its own CI, and is not invoked from SwiftUI/Compose or a real server. M2–M5 remain unfinished.
+
+## 2026-10-26: one-shot candidate CI repair and exact lock admission
+
+At HEAD `e456769caee2b29bc4c4bd2b28b5233e5d57b9c7`, run `40259009246` concluded FAILURE on both hosts. Rust test groups (27+12+14+6+7) passed; `clippy -- -D warnings` rejected four ignored `#[must_use] OutboundSubmission` results in tests at `submission_flow.rs` 245/254/266/293. Platform steps were skipped. This revision explicitly drops the intentionally unsent first-attempt plans, preserving all assertions and strict linting. These tests verify durable local claims, not real HTTPS POST.
+
+Native `Cargo.lock` linked from the verified earlier CI artifact Git blob `9d169cc99f0729d4b011f35835dc79816140fb68` (52,615 bytes; SHA256 `0b345c006c61a3ce179bb785f1306e180bdc2449bb2af2132be59742c0434465`). Dependency manifests unchanged from its generation. `check.sh` now fails without the lock instead of resolving dependencies silently, and Android/iOS Rust builds use `--locked`. No candidate vault files are included here; the uncommitted Keychain/Keystore ZIP remains available for a *selective* merge after CI, never wholesale overwrite of new POST.
+
+**Status:** Code submitted for its own CI; success/failure must be read from that exact run, not inherited from earlier builds. M1 previous accepted simulator baseline still exists; M2 real server/device acceptance incomplete. No production, main, credentials or private ZIP changed.

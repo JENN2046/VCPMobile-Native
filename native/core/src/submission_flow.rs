@@ -242,7 +242,7 @@ mod tests {
     }
     #[test] fn missing_receipt_never_resends_even_across_session() {
         let (_d,store)=store();let old=session('b');
-        first_attempt("https://vcp.example.org",&old,&store,"topic_a",WireKind::Message,body()).unwrap();
+        drop(first_attempt("https://vcp.example.org",&old,&store,"topic_a",WireKind::Message,body()).unwrap());
         let key=store.list().unwrap()[0].submission.key.clone();
         assert_eq!(reconcile_authenticated_history(&old,&store,&key,&json!([])).unwrap(),Reconciliation::SameSessionNoReceipt);
         assert_eq!(reconcile_authenticated_history(&session('c'),&store,&key,&json!([])).unwrap(),
@@ -251,7 +251,7 @@ mod tests {
     }
     #[test] fn exact_cross_session_receipt_closes_original_only() {
         let (_d,store)=store();let old=session('b');
-        first_attempt("https://vcp.example.org",&old,&store,"topic_a",WireKind::Message,body()).unwrap();
+        drop(first_attempt("https://vcp.example.org",&old,&store,"topic_a",WireKind::Message,body()).unwrap());
         let key=store.list().unwrap()[0].submission.key.clone();
         let wire=RecoverySubmission::new("topic_a".into(),WireKind::Message,serde_json::from_str(body()).unwrap()).unwrap();
         let receipt=json!([{"id":"exec_1","topicKey":"topic_a","requestId":"test_123","state":"running",
@@ -263,7 +263,7 @@ mod tests {
     }
     #[test] fn conflicting_and_ambiguous_receipts_preserve_unknown() {
         let (_d,store)=store();let old=session('b');
-        first_attempt("https://vcp.example.org",&old,&store,"topic_a",WireKind::Message,body()).unwrap();
+        drop(first_attempt("https://vcp.example.org",&old,&store,"topic_a",WireKind::Message,body()).unwrap());
         let key=store.list().unwrap()[0].submission.key.clone();
         let bad=json!([{"id":"e1","topicKey":"topic_a","requestId":"test_123","state":"running",
             "recovery":{"version":1,"sessionMarker":old.session_marker,"payloadHash":"c".repeat(64),"kind":"message"}}]);
@@ -290,7 +290,7 @@ mod tests {
     #[test] fn restart_cannot_implicitly_send_twice() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("restart.sqlite");
         let s=session('b');let first=PendingStore::open(&path).unwrap();
-        first_attempt("https://vcp.example.org",&s,&first,"topic_a",WireKind::Message,body()).unwrap();
+        drop(first_attempt("https://vcp.example.org",&s,&first,"topic_a",WireKind::Message,body()).unwrap());
         drop(first);
         let next=PendingStore::open(&path).unwrap();
         assert!(matches!(first_attempt("https://vcp.example.org",&s,&next,"topic_a",WireKind::Message,body()),Err(FlowError::ReconcileFirst)));
