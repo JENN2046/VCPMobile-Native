@@ -1,6 +1,5 @@
 import Foundation
 import Security
-import CryptoKit
 
 /// Never expose Keychain status descriptions, response bodies, or Cookie values.
 enum PortalVaultError: Error {
@@ -11,9 +10,12 @@ enum PortalVaultError: Error {
 /// service; the epoch only guards in-flight requests within this actor.
 actor PortalSessionVault {
     private let service: String
+    private let journalRoot: URL?
     private var epochs: [String: UInt64] = [:]
-    init(service: String = "org.vcptoolbox.nativeclient.dev.sessions.v1") {
+    init(service: String = "org.vcptoolbox.nativeclient.dev.sessions.v1", journalRoot: URL? = nil) {
         self.service = service
+        // Trusted host dependency for isolated tests, never a UI-selected path.
+        self.journalRoot = journalRoot
     }
     private func query(_ key: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
@@ -119,38 +121,46 @@ actor PortalSessionVault {
     /// SQLite/WAL files. No Cookie is written here; this is OS file protection,
     /// not a claim of application-level SQL encryption or physical erasure.
     private func pendingJournal(_ origin: String) throws -> NativePendingJournal {
-        let key = try credentialStorageKey(origin: origin)
-        let namespace = SHA256.hash(data: Data(service.utf8)).map { String(format: "%02x", $0) }.joined()
         let support = try FileManager.default.url(for: .applicationSupportDirectory,
             in: .userDomainMask, appropriateFor: nil, create: true)
-        var root = support.appendingPathComponent("portal-pending-v1", isDirectory: true)
-            .appendingPathComponent(namespace, isDirectory: true).appendingPathComponent(key, isDirectory: true)
+        var root = journalRoot ?? support.appendingPathComponent("portal-pending-v1", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.complete])
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: root.path)
         var values = URLResourceValues(); values.isExcludedFromBackup = true
         try root.setResourceValues(values)
-        let previous = root.appendingPathComponent("pending.sqlite")
-        let shared = support.appendingPathComponent("portal-pending-v1", isDirectory: true)
-            .appendingPathComponent("vcp-pending-v1-\(key).sqlite")
-        let hasShared = FileManager.default.fileExists(atPath: shared.path)
-            || (try? FileManager.default.destinationOfSymbolicLink(atPath: shared.path)) != nil
-        let hasPrevious = FileManager.default.fileExists(atPath: previous.path)
-            || (try? FileManager.default.destinationOfSymbolicLink(atPath: previous.path)) != nil
-        if hasShared && hasPrevious {
-            throw PortalVaultError.invalidRecord
-        }
-        let path = hasShared ? shared.path : previous.path
-        if hasShared {
-            var parent = shared.deletingLastPathComponent()
-            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: parent.path)
-            try parent.setResourceValues(values)
-        }
-        let journal = try NativePendingJournal.open(origin: origin, privatePath: path)
+        let journal = try NativePendingJournal.openScoped(origin: origin, privateDirectory: root.path)
+        let path = journal.privatePath()
+        var parent = URL(fileURLWithPath: path).deletingLastPathComponent()
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: parent.path)
+        try parent.setResourceValues(values)
         for suffix in ["", "-wal", "-shm"] where FileManager.default.fileExists(atPath: path + suffix) {
             try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: path + suffix)
         }
         return journal
+    }
+    /// Thin platform adapter to the same Rust capability pipeline as Android.
+    /// Reentrant preflight awaits never encompass the privileged claim: reload,
+    /// epoch, cancellation and claim occur synchronously under this actor.
+    func sendOriginalMessageOnce(_ origin: String, expected: NativeSessionInfo,
+                                 topicKey: String, requestId: String, text: String,
+                                 generation: UInt64, fence: NativeRecoveryFence) async throws -> NativeFirstSendResult {
+        let key = try credentialStorageKey(origin: origin)
+        guard let credential = try load(origin) else { throw PortalVaultError.notPaired }
+        let epoch = epochs[key, default: 0]
+        let journal = try pendingJournal(origin)
+        let check = try await credential.prepareMessageSend(journal: journal, expected: expected,
+            topicKey: topicKey, requestId: requestId, text: text, fence: fence)
+        try Task.checkCancellation()
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        guard let current = try load(origin) else { throw PortalVaultError.notPaired }
+        let dispatch = try current.claimMessageSend(journal: journal, check: check, expected: expected,
+            topicKey: topicKey, viewGeneration: generation)
+        let result = try await current.dispatchMessageOnce(dispatch: dispatch)
+        try Task.checkCancellation()
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        guard try load(origin) != nil else { throw PortalVaultError.notPaired }
+        return result
     }
     /// Storage checkpoint only. No POST, new execution or retry authority.
     func checkpointOriginal(_ origin: String, expected: NativeSessionInfo, topic: String,

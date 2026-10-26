@@ -21,6 +21,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import java.util.UUID
+import org.vcptoolbox.nativecore.messageInputMaxUtf16
+import org.vcptoolbox.nativecore.isMessageTextValid
 import org.vcptoolbox.nativecore.NativeSendException
 import org.json.JSONObject
 import org.vcptoolbox.nativecore.NativeHistoryRow
@@ -122,9 +124,11 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     private var historyExecutable = false
     private var chatFence: NativeRecoveryFence? = null
     private var chatJob: Job? = null
-    fun updateDraft(value: String) { if (!chatActive && value.length <= 12000) draft = value }
+    val confirmationGeneration: Long get() = viewGeneration
+    private val inputLimit = messageInputMaxUtf16().toInt()
+    fun updateDraft(value: String) { if (!chatActive && value.length <= inputLimit) draft = value }
     val canSend: Boolean get() = !busy && status == "SESSION_READY" && selectedTopic != null &&
-        historyExecutable && !historyHasMore && !unresolvedSend && pendingRows.isEmpty() && draft.isNotBlank()
+        historyExecutable && !historyHasMore && !unresolvedSend && pendingRows.isEmpty() && isMessageTextValid(draft)
     fun stopChat() {
         chatFence?.cancel()
         chatJob?.cancel()
@@ -191,7 +195,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                     if (sendText != null) sendStatus = when (error) {
                         is NativeSendException.OutstandingPending -> "PENDING_EXISTS_CHECK_ORIGINAL"
                         is NativeSendException.InvalidMessage -> "INVALID_MESSAGE_NOT_SENT"
-                        is NativeSendException.ContextChanged -> "SESSION_CHANGED_NOT_SENT"
+                        is NativeSendException.ContextChanged -> "CONTEXT_CHANGED_NOT_SENT"
                         is NativeSendException.TopicUnauthorized -> "TOPIC_DENIED_NOT_SENT"
                         else -> "UNKNOWN_CHECK_ORIGINAL"
                     }
@@ -366,6 +370,15 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
 @Composable
 internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
     DisposableEffect(model) { onDispose { model.stopChat(); model.cancelRecovery() } }
+    var confirmingSend by remember(model.origin, model.selectedTopic, model.confirmationGeneration, model.draft) { mutableStateOf(false) }
+    if (confirmingSend) AlertDialog(
+        onDismissRequest = { confirmingSend = false },
+        title = { Text("确认原始消息首次提交") },
+        text = { Text("只提交一次并先保存在本机。断网或 HTTP 202 不代表完成；未知提交先核对原回执，不自动重发。") },
+        confirmButton = { TextButton(onClick = { confirmingSend = false; model.sendMessage() },
+            modifier = Modifier.testTag("confirmOriginalSend")) { Text("确认发送一次") } },
+        dismissButton = { TextButton(onClick = { confirmingSend = false }) { Text("取消") } }
+    )
     // Not rememberSaveable: pairing codes must never enter saved instance state.
     var code by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -408,8 +421,8 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
             Text("消息", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(model.draft, model::updateDraft, enabled = !model.busy,
                 label = { Text("消息内容") }, modifier = Modifier.fillMaxWidth().testTag("messageDraft"))
-            Button(onClick = model::sendMessage, enabled = model.canSend,
-                modifier = Modifier.testTag("sendMessage")) { Text("发送并查看回复") }
+            Button(onClick = { confirmingSend = true }, enabled = model.canSend,
+                modifier = Modifier.testTag("sendMessage")) { Text("确认后发送并查看回复") }
             Text(model.sendStatus, Modifier.testTag("sendStatus"))
             if (model.outgoingText.isNotEmpty()) Text("本次原消息：${model.outgoingText}")
             OutlinedButton(onClick = model::receiveReplies, enabled = !model.busy,

@@ -13,9 +13,15 @@ use std::time::Duration;
 
 const BODY: &str = r#"{ "requestId":"lost_ack_123", "text":"synthetic ACK loss 🧭" }"#;
 
+// Low-level receipt/transport fixtures intentionally use a fixed synthetic file.
+// This checked crate-private opener is not a production native bypass.
+fn test_journal(origin: String, path: String) -> Result<std::sync::Arc<crate::pending_journal::NativePendingJournal>, crate::pending_journal::PendingJournalError> {
+    crate::pending_journal::NativePendingJournal::open_private_file(origin, PathBuf::from(path))
+}
+
 #[tokio::test]
 async fn fenced_native_send_ack_loss_reopen_queries_original_and_never_posts_twice() {
-    use crate::native_recovery::{NativePendingJournal, NativeRecoveryFence, NativeRecoveryOutcome};
+    use crate::native_recovery::{NativeRecoveryFence, NativeRecoveryOutcome};
     use crate::pending_journal::NativeSendError;
     use crate::session_credential::{NativeSessionInfo, SessionCredential};
     let root = tempfile::tempdir().unwrap();
@@ -28,7 +34,7 @@ async fn fenced_native_send_ack_loss_reopen_queries_original_and_never_posts_twi
         let credential = SessionCredential::from_server_cookie(server.origin.clone(), server.origin.clone(),
             format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600", "B".repeat(43))).unwrap();
         let path = root.path().join(format!("{mode}.sqlite")).to_str().unwrap().to_owned();
-        let journal = NativePendingJournal::open(server.origin.clone(), path.clone()).unwrap();
+        let journal = test_journal(server.origin.clone(), path.clone()).unwrap();
         let fence = NativeRecoveryFence::new(expected.clone(), "topic_a".into(), 4).unwrap();
         let check = credential.message_check_with_client(journal.clone(), expected.clone(), "topic_a".into(),
             "lost_ack_123".into(), "synthetic ACK loss 🧭".into(), fence.clone(), &client).await.unwrap();
@@ -38,7 +44,7 @@ async fn fenced_native_send_ack_loss_reopen_queries_original_and_never_posts_twi
         assert_eq!(result.disposition, "UNKNOWN_KEEP_PENDING");
         assert!(matches!(credential.message_dispatch_with_client(dispatch, &client).await, Err(NativeSendError::AlreadyConsumed)));
         drop(journal);
-        let reopened = NativePendingJournal::open(server.origin.clone(), path).unwrap();
+        let reopened = test_journal(server.origin.clone(), path).unwrap();
         let original = reopened.pending_for_topic("topic_a".into()).unwrap().remove(0);
         assert_eq!(reopened.store.list().unwrap()[0].state, PendingState::AwaitingConfirmation);
         let query = credential.recovery_query_with_client(reopened.clone(), original, fence, &client).await;
@@ -53,6 +59,147 @@ async fn fenced_native_send_ack_loss_reopen_queries_original_and_never_posts_twi
             assert_eq!(reopened.store.list().unwrap().len(), 1);
         }
         assert_eq!(server.counts(), json!({"post":1,"session":3,"history":1,"other":0}));
+    }
+}
+
+// Public constructors + real SQLite + real isolated TLS, not mocked claims.
+#[tokio::test]
+async fn directed_two_instances_claim_once_and_reopen_only_consumes_exact_receipt() {
+    use crate::native_recovery::{NativeRecoveryFence, NativeRecoveryOutcome};
+    use crate::pending_journal::{NativePendingJournal, NativeSendError};
+    use crate::session_credential::{NativeSessionInfo, SessionCredential};
+    use std::sync::{Arc, Barrier};
+    let root = tempfile::tempdir().unwrap();
+    let ca = certificate(root.path());
+    for mode in ["fenced_race_same_id", "fenced_race_new_ids", "fenced_202", "fenced_dual_before_consume"] {
+        let server = Server::start(root.path(), mode).await;
+        let client = PortalHttpClient::loopback_for_test(&server.origin, ca.clone(), server.port);
+        let scope = root.path().join(mode); fs::create_dir(&scope).unwrap();
+        let expected = NativeSessionInfo { entry_id:"a".repeat(64), session_marker:"b".repeat(64),
+            topic_keys:vec!["topic_a".into()],selected_topic:None };
+        let credential = SessionCredential::from_server_cookie(server.origin.clone(),server.origin.clone(),
+            format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600","B".repeat(43))).unwrap();
+        let first = NativePendingJournal::open_scoped(server.origin.clone(),scope.to_str().unwrap().into()).unwrap();
+        let second = NativePendingJournal::new(server.origin.clone(),scope.to_str().unwrap().into()).unwrap();
+        assert_eq!(first.private_path(),second.private_path());
+        let mut late_checks=vec![];
+        for journal in [first.clone(),second.clone()] {
+            let late_fence=NativeRecoveryFence::new(expected.clone(),"topic_a".into(),8).unwrap();
+            let late=credential.message_check_with_client(journal.clone(),expected.clone(),"topic_a".into(),
+                "lost_ack_123".into(),"synthetic ACK loss 🧭".into(),late_fence,&client).await.unwrap();
+            late_checks.push((journal,late));
+        }
+        let barrier=Arc::new(Barrier::new(2)); let mut threads=vec![];
+        for (index,journal) in [first.clone(),second.clone()].into_iter().enumerate() {
+            let fence=NativeRecoveryFence::new(expected.clone(),"topic_a".into(),8).unwrap();
+            let id=if mode=="fenced_race_new_ids" && index==1 {"other_ack_123"} else {"lost_ack_123"};
+            let check=credential.message_check_with_client(journal.clone(),expected.clone(),"topic_a".into(),
+                id.into(),"synthetic ACK loss 🧭".into(),fence,&client).await.unwrap();
+            let credential=credential.clone();let expected=expected.clone();let barrier=barrier.clone();
+            threads.push(std::thread::spawn(move || { barrier.wait();
+                credential.claim_message_send(journal,check,expected,"topic_a".into(),8) }));
+        }
+        let mut winners=vec![];let mut refused=0;
+        for thread in threads { match thread.join().unwrap() {
+            Ok(dispatch)=>winners.push(dispatch),Err(NativeSendError::OutstandingPending | NativeSendError::ContextChanged)=>refused+=1,
+            _=>panic!("unexpected admission outcome"),
+        }}
+        assert_eq!(refused,1);assert_eq!(winners.len(),1);
+        let dispatch=winners.remove(0);
+        let result=credential.message_dispatch_with_client(dispatch.clone(),&client).await.unwrap();
+        assert_eq!(result.disposition,if mode=="fenced_202" {"HTTP_202_UNVERIFIED"} else {"UNKNOWN_KEEP_PENDING"});
+        assert!(matches!(credential.message_dispatch_with_client(dispatch,&client).await,Err(NativeSendError::AlreadyConsumed)));
+        drop(first);
+        let reopened=NativePendingJournal::new(server.origin.clone(),scope.to_str().unwrap().into()).unwrap();
+        assert_eq!(reopened.store.list().unwrap().len(),1);
+        assert_eq!(reopened.store.list().unwrap()[0].state,PendingState::AwaitingConfirmation);
+        let original=reopened.pending_for_topic("topic_a".into()).unwrap().remove(0);
+        let fence=NativeRecoveryFence::new(expected.clone(),"topic_a".into(),9).unwrap();
+        let ticket=credential.recovery_query_with_client(reopened.clone(),original,fence,&client).await.unwrap();
+        assert_eq!(reopened.store.list().unwrap().len(),1,"GET cannot clear pending");
+        if mode=="fenced_dual_before_consume" {
+            let legacy=scope.join(crate::session_credential::credential_storage_key(server.origin.clone()).unwrap());
+            fs::create_dir(&legacy).unwrap();fs::write(legacy.join("pending.sqlite"),[]).unwrap();
+            assert!(matches!(credential.confirm_pending_recovery(reopened.clone(),ticket,expected,"topic_a".into(),9),
+                Err(crate::native_recovery::NativeRecoveryError::StorageRejected)));
+            assert_eq!(reopened.store.list().unwrap().len(),1,"held receipt cannot bypass dual storage");
+        } else {
+            assert!(matches!(credential.confirm_pending_recovery(reopened.clone(),ticket,expected.clone(),"topic_a".into(),9).unwrap(),
+                NativeRecoveryOutcome::Accepted{execution_state,..} if execution_state=="running"));
+            assert!(reopened.store.list().unwrap().is_empty());
+            for (journal,late) in late_checks {
+                assert!(matches!(credential.claim_message_send(journal,late,expected.clone(),"topic_a".into(),8),
+                    Err(NativeSendError::ContextChanged)),"a delayed preflight must not recreate a confirmed original");
+            }
+            assert!(reopened.store.list().unwrap().is_empty());
+        }
+        assert_eq!(server.counts(),json!({"post":1,"session":6,"history":1,"other":0}));
+    }
+}
+
+#[tokio::test]
+async fn directed_cancel_after_http_acceptance_is_unknown_and_survives_reopen() {
+    use crate::native_recovery::NativeRecoveryFence;
+    use crate::pending_journal::NativePendingJournal;
+    use crate::session_credential::{NativeSessionInfo,SessionCredential};
+    let root=tempfile::tempdir().unwrap();let ca=certificate(root.path());
+    let server=Server::start(root.path(),"fenced_slow_ack").await;
+    let client=PortalHttpClient::loopback_for_test(&server.origin,ca,server.port);
+    let expected=NativeSessionInfo{entry_id:"a".repeat(64),session_marker:"b".repeat(64),topic_keys:vec!["topic_a".into()],selected_topic:None};
+    let scope=root.path().join("journal");fs::create_dir(&scope).unwrap();
+    let journal=NativePendingJournal::open_scoped(server.origin.clone(),scope.to_str().unwrap().into()).unwrap();
+    let credential=SessionCredential::from_server_cookie(server.origin.clone(),server.origin.clone(),
+        format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600","B".repeat(43))).unwrap();
+    let fence=NativeRecoveryFence::new(expected.clone(),"topic_a".into(),10).unwrap();
+    let check=credential.message_check_with_client(journal.clone(),expected.clone(),"topic_a".into(),"lost_ack_123".into(),
+        "synthetic ACK loss 🧭".into(),fence.clone(),&client).await.unwrap();
+    let dispatch=credential.claim_message_send(journal.clone(),check,expected,"topic_a".into(),10).unwrap();
+    let send=credential.message_dispatch_with_client(dispatch,&client);
+    let cancel=async {
+        let marker=root.path().join("fenced_slow_ack.accepted");
+        for _ in 0..400 { if marker.exists() {break} tokio::time::sleep(Duration::from_millis(5)).await; }
+        assert!(marker.exists(),"must cancel after fixture accepted POST, not before send");fence.cancel();
+    };
+    let (result,())=tokio::join!(send,cancel);
+    assert_eq!(result.unwrap().disposition,"UNKNOWN_KEEP_PENDING");drop(journal);
+    let reopened=NativePendingJournal::new(server.origin.clone(),scope.to_str().unwrap().into()).unwrap();
+    assert_eq!(reopened.store.list().unwrap()[0].state,PendingState::AwaitingConfirmation);
+    assert_eq!(server.counts(),json!({"post":1,"session":1,"history":0,"other":0}));
+}
+
+#[tokio::test]
+async fn directed_preflight_in_flight_login_topic_and_cancel_changes_prevent_claim() {
+    use crate::native_recovery::NativeRecoveryFence;
+    use crate::pending_journal::{NativePendingJournal,NativeSendError};
+    use crate::session_credential::{NativeSessionInfo,SessionCredential};
+    let root=tempfile::tempdir().unwrap();let ca=certificate(root.path());
+    for change in ["login","topic","cancel"] {
+        // Separate service files because each fixture must expose its first GET.
+        let fixture=root.path().join(change);fs::create_dir(&fixture).unwrap();
+        for name in ["leaf.pem","leaf.key"] {fs::copy(root.path().join(name),fixture.join(name)).unwrap();}
+        let server=Server::start(&fixture,"fenced_slow_preflight").await;
+        let client=PortalHttpClient::loopback_for_test(&server.origin,ca.clone(),server.port);
+        let expected=NativeSessionInfo{entry_id:"a".repeat(64),session_marker:"b".repeat(64),topic_keys:vec!["topic_a".into()],selected_topic:None};
+        let credential=SessionCredential::from_server_cookie(server.origin.clone(),server.origin.clone(),
+            format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600","B".repeat(43))).unwrap();
+        let scope=fixture.join("journal");fs::create_dir(&scope).unwrap();
+        let journal=NativePendingJournal::open_scoped(server.origin.clone(),scope.to_str().unwrap().into()).unwrap();
+        let fence=NativeRecoveryFence::new(expected.clone(),"topic_a".into(),11).unwrap();
+        let prepare=credential.message_check_with_client(journal.clone(),expected.clone(),"topic_a".into(),"lost_ack_123".into(),
+            "synthetic ACK loss 🧭".into(),fence.clone(),&client);
+        let replace=async {
+            for _ in 0..400 {if server.counts()["session"]==1 {break} tokio::time::sleep(Duration::from_millis(5)).await;}
+            assert_eq!(server.counts()["session"],1,"change while session GET is in flight");
+            if change!="login" {fence.cancel();}
+            SessionCredential::from_server_cookie(server.origin.clone(),server.origin.clone(),
+                format!("__Secure-vcp_mobile={}; Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600","C".repeat(43))).unwrap()
+        };
+        let (prepared,replacement)=tokio::join!(prepare,replace);
+        if change=="login" {
+            assert!(matches!(replacement.claim_message_send(journal.clone(),prepared.unwrap(),expected,"topic_a".into(),11),Err(NativeSendError::CredentialMismatch)));
+        } else { assert!(matches!(prepared,Err(NativeSendError::Cancelled))); }
+        assert!(journal.store.list().unwrap().is_empty());
+        assert_eq!(server.counts(),json!({"post":0,"session":1,"history":0,"other":0}));
     }
 }
 
@@ -455,7 +602,7 @@ async fn native_bridge_expiry_context_cancel_and_single_consumption_keep_origina
         let server = Server::start(root.path(), mode).await;
         let path = root.path().join(format!("bridge-{mode}.sqlite"));
         let journal =
-            NativePendingJournal::open(server.origin.clone(), path.to_str().unwrap().into())
+            test_journal(server.origin.clone(), path.to_str().unwrap().into())
                 .unwrap();
         let pending = journal
             .prepare_original(
@@ -491,7 +638,7 @@ async fn native_bridge_expiry_context_cancel_and_single_consumption_keep_origina
         drop(journal);
         let credential = SessionCredential::restore(server.origin.clone(), secret).unwrap();
         let journal =
-            NativePendingJournal::open(server.origin.clone(), path.to_str().unwrap().into())
+            test_journal(server.origin.clone(), path.to_str().unwrap().into())
                 .unwrap();
         let expected = native_info(if mode == "cross_exact" || mode == "cross_absent" {
             'c'
@@ -600,7 +747,7 @@ async fn native_bridge_expiry_context_cancel_and_single_consumption_keep_origina
                 credential.clone()
             };
             let target_journal = if mode == "wrong_journal" {
-                NativePendingJournal::open(
+                test_journal(
                     server.origin.clone(),
                     root.path().join("other.sqlite").to_str().unwrap().into(),
                 )
@@ -695,7 +842,7 @@ fn native_bridge_abrupt_process_reopen_after_lost_ack_does_not_reexecute() {
         let ca =
             reqwest::Certificate::from_pem(&fs::read(Path::new(&root).join("ca.pem")).unwrap())
                 .unwrap();
-        let journal = NativePendingJournal::open(
+        let journal = test_journal(
             origin.clone(),
             Path::new(&root)
                 .join("process.sqlite")
@@ -736,7 +883,7 @@ fn native_bridge_abrupt_process_reopen_after_lost_ack_does_not_reexecute() {
     let output = Command::new(std::env::current_exe().unwrap()).args(["--exact","receipt_query::tests::native_bridge_abrupt_process_reopen_after_lost_ack_does_not_reexecute","--nocapture"])
         .env("VCP_RECOVERY_CHILD_ROOT",root.path()).env("VCP_RECOVERY_CHILD_PORT",server.port.to_string()).output().unwrap();
     assert!(output.status.success(), "synthetic child dispatch failed");
-    let journal = NativePendingJournal::open(
+    let journal = test_journal(
         server.origin.clone(),
         root.path().join("process.sqlite").to_str().unwrap().into(),
     )

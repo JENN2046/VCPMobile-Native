@@ -10,6 +10,7 @@ import socket
 import socketserver
 import ssl
 import sys
+import time
 
 mode, ready_file, count_file = sys.argv[1:]
 counts = {"post": 0, "session": 0, "history": 0, "other": 0}
@@ -19,7 +20,10 @@ receipt = None
 
 def counted(kind):
     counts[kind] += 1
-    Path(count_file).write_text(json.dumps(counts))
+    path = Path(count_file)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(counts))
+    temporary.replace(path)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -45,21 +49,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
         counted("post")
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if 0 < length <= 1024 else b""
+        incoming = json.loads(body or b"{}")
+        expected = dict(payload, attachments=[]) if mode.startswith("fenced_") else payload
+        if mode == "fenced_race_new_ids" and incoming.get("requestId") in ("lost_ack_123", "other_ack_123"):
+            expected = dict(expected, requestId=incoming["requestId"])
         valid = (self.path == "/mobile/api/conversations/topic_a/messages"
                  and self.authenticated()
                  and self.headers.get("Origin") == f"https://recovery.example.test:{self.server.server_port}"
                  and self.headers.get("Content-Type") == "application/json"
                  and self.headers.get("X-NativeSync-Entry-Id") == "a" * 64
                  and self.headers.get("X-NativeSync-Session-Marker") == "b" * 64
-                 and json.loads(body or b"{}") == (dict(payload, attachments=[]) if mode.startswith("fenced_") else payload))
+                 and incoming == expected)
         if not valid or counts["post"] != 1:
             self.response(400, {})
             return
-        canonical = {"topicKey": "topic_a", "kind": "message", "payload": dict(payload, attachments=[])}
+        canonical = {"topicKey": "topic_a", "kind": "message", "payload": dict(incoming, attachments=[])}
         digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
-        receipt = {"id": "exec_synthetic", "topicKey": "topic_a", "requestId": payload["requestId"], "state": "running",
+        receipt = {"id": "exec_synthetic", "topicKey": "topic_a", "requestId": incoming["requestId"], "state": "running",
                    "recovery": {"version": 1, "sessionMarker": "b" * 64, "payloadHash": digest, "kind": "message"}}
         # Accepted into this ephemeral fixture, but no response reaches client.
+        if mode == "fenced_202":
+            self.response(202, {"accepted": True})
+            return
+        if mode == "fenced_slow_ack":
+            Path(ready_file).with_suffix(".accepted").write_text("1")
+            time.sleep(0.2)
         self.connection.shutdown(socket.SHUT_RDWR)
         self.connection.close()
 
@@ -70,6 +84,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == "/mobile/api/session":
             counted("session")
+            if mode == "fenced_slow_preflight" and counts["session"] == 1:
+                time.sleep(0.2)
             if mode in ("unauthenticated", "forbidden"):
                 self.response(401 if mode == "unauthenticated" else 403, {})
                 return

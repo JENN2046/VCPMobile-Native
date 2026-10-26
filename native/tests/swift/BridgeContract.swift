@@ -66,18 +66,26 @@ func require(_ condition: Bool, _ message: String) throws {
         try require(duplicateRejected, "completed probe cannot restart")
         print("PASS: Swift one-shot lifecycle")
 
+        try require(messageInputMaxUtf16() == 4000,"shared UTF16 limit")
+        for text in [String(repeating:"中",count:4000),String(repeating:"🧭",count:2000),String(repeating:"中",count:3998)+"🧭"] {
+            try require(isMessageTextValid(text:text),"UTF16 boundary accepted")
+        }
+        for text in [String(repeating:"中",count:4001),String(repeating:"🧭",count:2001),String(repeating:"中",count:3999)+"🧭"] {
+            try require(!isMessageTextValid(text:text),"UTF16 boundary refused")
+        }
+        print("PASS: Swift shared UTF16 policy")
+
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("vcp-native-recovery-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
         defer { try? FileManager.default.removeItem(at:root) }
         let origin = "https://recovery-binding.example.test"
         let expected = NativeSessionInfo(entryId:String(repeating:"a",count:64),sessionMarker:String(repeating:"b",count:64),
             topicKeys:["topic_a"],selectedTopic:nil)
-        let path = root.appendingPathComponent("pending.sqlite").path
-        var journal: NativePendingJournal? = try NativePendingJournal.open(origin:origin,privatePath:path)
+        var journal: NativePendingJournal? = try NativePendingJournal.openScoped(origin:origin,privateDirectory:root.path)
         let original = try journal!.prepareOriginal(expected:expected,topicKey:"topic_a",kind:.message,
             originalJson:"{ \"requestId\":\"binding_pending_123\", \"text\":\"synthetic\" }")
         journal = nil
-        let reopened = try NativePendingJournal.open(origin:origin,privatePath:path)
+        let reopened = try NativePendingJournal.openScoped(origin:origin,privateDirectory:root.path)
         let credential = try SessionCredential.fromServerCookie(origin:origin,responseOrigin:origin,
             setCookie:"__Secure-vcp_mobile=\(String(repeating:"B",count:43)); Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600")
         let fence = try NativeRecoveryFence(expected:expected,topicKey:"topic_a",viewGeneration:3)

@@ -118,3 +118,33 @@ assertions remain. Android JVM view-state tests are included. The workflow
 change is not a CI PASS; read the exact published SHA/run before reporting a
 result. iOS Complete remains PENDING_REAL_DEVICE_ACCEPTANCE. No shared/main
 update, PR, merge, release, real service/model or device/signing operation.
+
+
+## Local directed integration, fixed inputs 53e9017 and d2b76e0 (2026-10-26)
+
+Fixed input `53e901732bec8a80d43e95720b5ab36f183d2c34` plus selected UI
+from `d2b76e00eaada46c25ccdbbb509068c68215da24`, not a branch merge.
+The candidate's guarded sender/recovery and one bounded Android GET reply
+loop remain. One Rust storage selector recognizes all prior layouts, refuses
+multiple stores without deletion, and rejects legacy arbitrary-file/unguarded
+send APIs. Both composers share the 4000 UTF-16 rule. Swift composer uses the
+same prepare/claim/dispatch core under its actor. Journal changes invalidate
+old preflights within the existing SQLite admission transaction, including
+late duplicate confirmation after exact receipt cleanup. No schema change.
+
+Actual local checks: Rust116 (77+12+14+6+7), strict clippy, release/bindings,
+Kotlin host8 and Android source compilation/JVM3. Isolated real-TLS/SQLite
+regressions cover concurrency, 202/ACK-loss/reopen, preflight replacement/
+Topic/cancellation and exact receipt cleanup. Device vault/UI races, complete
+Android APK/emulator and Swift/iOS compilation have not run on this Linux
+host. No new remote CI or publication. iOS Complete protection remains
+PENDING_REAL_DEVICE_ACCEPTANCE; original strict assertion/failures retained.
+No real NativeSync/model/device acceptance or M2/M5 completion.
+See `docs/DIRECTED_CHAT_INTEGRATION.md` for exact call chains/tests/limits.
+
+The original selected cloud recovered; the interrupted unknown write was read
+back before continuing. Work is confined to an isolated local worktree/branch.
+The delayed-preflight regression first failed on a local intermediate tree,
+then passed after the same-admission transaction snapshot check. This is not
+a reproduced production incident. No shared/main ref, workflow, Issue, PR,
+remote run, production history or credentials were modified in this batch.

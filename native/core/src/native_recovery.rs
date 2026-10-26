@@ -107,12 +107,13 @@ fn outcome(value: Reconciliation) -> NativeRecoveryOutcome {
 impl NativePendingJournal {
     #[uniffi::constructor]
     pub fn open(origin: String, private_path: String) -> Result<Arc<Self>, NativeRecoveryError> {
-        Self::open_private_file(origin, std::path::PathBuf::from(private_path))
-            .map_err(|_| NativeRecoveryError::StorageRejected)
+        // Arbitrary-file opening cannot discover another layout's UNKNOWN.
+        let _ = (origin, private_path);
+        Err(NativeRecoveryError::StorageRejected)
     }
     /// Storage checkpoint only, before a future explicit dispatch. Preserves
     /// exact bytes and Topic exclusivity. This grants no transport authority.
-    /// This batch exposes no send button or POST method through this bridge.
+    /// This checkpoint never grants a message-dispatch capability.
     pub fn prepare_original(
         &self,
         expected: NativeSessionInfo,
@@ -120,6 +121,7 @@ impl NativePendingJournal {
         kind: NativePendingKind,
         original_json: String,
     ) -> Result<NativePendingInfo, NativeRecoveryError> {
+        self.verify_location().map_err(|_| NativeRecoveryError::StorageRejected)?;
         let session = checked_session(&expected, &topic_key)?;
         let payload: Value = serde_json::from_str(&original_json)
             .map_err(|_| NativeRecoveryError::StorageRejected)?;
@@ -153,6 +155,7 @@ impl NativePendingJournal {
         &self,
         topic_key: String,
     ) -> Result<Vec<NativePendingInfo>, NativeRecoveryError> {
+        self.verify_location().map_err(|_| NativeRecoveryError::StorageRejected)?;
         Ok(self
             .store
             .list()
@@ -260,6 +263,7 @@ impl NativeRecoveryCheck {
         {
             return Err(NativeRecoveryError::ContextChanged);
         }
+        journal.verify_location().map_err(|_| NativeRecoveryError::StorageRejected)?;
         let ticket = self
             .ticket
             .lock()

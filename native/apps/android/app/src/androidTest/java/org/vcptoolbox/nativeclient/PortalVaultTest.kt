@@ -43,6 +43,9 @@ class PortalVaultTest {
         for (origin in listOf(a,b,"$a:8443")) {
             vault.remove(origin)
             File(context.noBackupFilesDir,"portal-pending-v1/${credentialStorageKey(origin)}").deleteRecursively()
+            for (suffix in listOf("", "-wal", "-shm")) {
+                File(context.noBackupFilesDir,"portal-pending-v1/vcp-pending-v1-${credentialStorageKey(origin)}.sqlite$suffix").delete()
+            }
         }
     }
     @Test fun encryptedRoundtripAcrossInstances(): Unit = runBlocking {

@@ -23,6 +23,8 @@ pub enum StoreError {
     IdentityConflict,
     #[error("entry and Topic already have an unresolved submission")]
     TopicPending,
+    #[error("pending journal changed since non-mutating preflight")]
+    PreflightChanged,
     #[error("pending storage capacity reached; no request may be sent")]
     Capacity,
     #[error("pending request not found")]
@@ -74,6 +76,15 @@ pub struct PendingRecord {
 pub enum RecoveryAction {
     QueryOriginalBeforeExplicitRetry,
     QueryOnlyAcrossSession,
+}
+
+/// Ephemeral snapshot tied to this live SQLite connection. It is never a
+/// durable send grant: own mutations and commits by other connections revoke it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoreStamp { data_version: i64, total_changes: u64 }
+fn stamp(conn: &Connection) -> Result<StoreStamp, StoreError> {
+    Ok(StoreStamp { data_version: conn.query_row("PRAGMA data_version", [], |r| r.get(0))?,
+        total_changes: conn.total_changes() })
 }
 
 /// SQLite handles cross-connection transactions. The mutex protects one
@@ -169,9 +180,22 @@ impl PendingStore {
     /// earlier sessions and invitation requests. Must happen before any POST.
     /// IMMEDIATE serializes admission across independent SQLite connections.
     pub fn prepare_topic_exclusive(&self, submission: &Submission) -> Result<PendingRecord, StoreError> {
+        self.prepare_topic_exclusive_at_stamp(submission, None)
+    }
+    pub(crate) fn change_stamp(&self) -> Result<StoreStamp, StoreError> {
+        let conn = self.lock()?;
+        stamp(&conn)
+    }
+    /// Check the preflight snapshot inside the SAME IMMEDIATE admission
+    /// transaction. An old check cannot recreate a row after exact cleanup.
+    pub(crate) fn prepare_topic_exclusive_at_stamp(&self, submission: &Submission,
+        expected: Option<StoreStamp>) -> Result<PendingRecord, StoreError> {
         validate(submission)?;
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(expected) = expected {
+            if stamp(&tx)? != expected { return Err(StoreError::PreflightChanged); }
+        }
         let (count, same): (i64, i64) = tx.query_row(
             "SELECT COUNT(*), COALESCE(SUM(CASE WHEN session_marker=?3 AND request_id=?4 THEN 1 ELSE 0 END), 0) FROM pending_submission WHERE endpoint_id=?1 AND topic_id=?2",
             params![submission.key.endpoint_id, submission.topic_id, submission.key.session_marker, submission.key.request_id],

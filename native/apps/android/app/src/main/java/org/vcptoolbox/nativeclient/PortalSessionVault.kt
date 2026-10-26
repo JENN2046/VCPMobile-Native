@@ -257,20 +257,8 @@ internal class PortalSessionVault(context: Context) {
             !appContext.getSystemService(UserManager::class.java).isUserUnlocked) {
             throw PortalVaultException("STORAGE_LOCKED")
         }
-        val id = keyId(origin)
-        val root = File(appContext.noBackupFilesDir, "portal-pending-v1/$id")
-        val sharedFile = File(pendingDirectory, "vcp-pending-v1-$id.sqlite")
-        val previousFile = File(root, "pending.sqlite")
-        // Preserve either earlier layout, but never split a Topic's unknown
-        // submission across journals or silently ignore competing originals.
-        if (sharedFile.exists() || java.nio.file.Files.isSymbolicLink(sharedFile.toPath())) {
-            if (previousFile.exists() || java.nio.file.Files.isSymbolicLink(previousFile.toPath())) {
-                throw PortalVaultException("MULTIPLE_PENDING_STORES_REVIEW")
-            }
-            return NativePendingJournal(origin, pendingDirectory.absolutePath)
-        }
-        if (!root.isDirectory && !root.mkdirs()) throw PortalVaultException("WRITE_FAILED")
-        return NativePendingJournal.open(origin, File(root, "pending.sqlite").absolutePath)
+        if (!pendingDirectory.isDirectory && !pendingDirectory.mkdirs()) throw PortalVaultException("WRITE_FAILED")
+        return NativePendingJournal.openScoped(origin, pendingDirectory.absolutePath)
     }
 
     /** Deliberate first message only. Network preflight cannot itself claim
@@ -312,7 +300,7 @@ internal class PortalSessionVault(context: Context) {
     }
 
     /** Checkpoint for the explicit submission caller, not a dispatch grant.
-     * This batch's UI has no send path; it only queries existing originals.
+     * A checkpoint cannot grant a send capability.
      */
     suspend fun checkpointOriginal(origin: String, expected: NativeSessionInfo, topic: String,
                                    kind: NativePendingKind, originalJson: String): NativePendingInfo = withContext(Dispatchers.IO) {

@@ -1,4 +1,9 @@
-# M2 native initial message attempt (source-only batch)
+# M2 native initial message attempt (historical seam description)
+
+The local directed integration now explicitly rejects this unguarded legacy
+ABI; mobile adapters use the single protected prepare/claim/dispatch pipeline.
+See [current local contract](DIRECTED_CHAT_INTEGRATION.md). The description
+below records the earlier seam and is not the current callable send contract.
 
 The native pending journal now exposes an explicit `send_original_message_once`
 Rust/UniFFI entry point. Neither mobile screen calls it yet. A future deliberate

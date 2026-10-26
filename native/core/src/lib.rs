@@ -20,6 +20,7 @@ pub mod session_credential;
 pub mod pairing;
 pub mod history;
 pub mod pending_journal;
+mod journal_location;
 pub mod receipt_query;
 pub mod native_recovery;
 pub mod native_send;

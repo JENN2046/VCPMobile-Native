@@ -121,6 +121,12 @@ pub fn first_attempt(
     origin: &str, session: &PortalSession, store: &PendingStore,
     topic_key: &str, kind: WireKind, original_json: &str,
 ) -> Result<OutboundSubmission, FlowError> {
+    first_attempt_at_stamp(origin, session, store, topic_key, kind, original_json, None)
+}
+/// Same admission/claim algorithm, with an optional live preflight snapshot.
+pub(crate) fn first_attempt_at_stamp(origin: &str, session: &PortalSession, store: &PendingStore,
+    topic_key: &str, kind: WireKind, original_json: &str, stamp: Option<crate::pending::StoreStamp>,
+) -> Result<OutboundSubmission, FlowError> {
     let origin = HttpsOrigin::parse(origin)?;
     let path = session.submission_path(topic_key, kind == WireKind::Invitation)?;
     let payload: Value = serde_json::from_str(original_json).map_err(|_| FlowError::InvalidSubmission)?;
@@ -136,7 +142,7 @@ pub fn first_attempt(
             WireKind::Invitation => StoredKind::Invite },
         payload_json: original_json.into(),
     };
-    let saved = session.admit(store, &submission)?;
+    let saved = session.admit_at_stamp(store, &submission, stamp)?;
     if saved.state != PendingState::Prepared || !store.claim_first_attempt(&submission.key)? {
         return Err(FlowError::ReconcileFirst);
     }

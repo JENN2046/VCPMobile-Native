@@ -8,6 +8,18 @@ use crate::submission_flow::OutboundSubmission;
 use crate::transport_policy::SubmissionHttpOutcome;
 use std::sync::{Arc, Mutex};
 
+/// New deliberate messages use the shared UI limit. Historic receipt/hash
+/// validation retains the original 12000-unit NativeSync wire contract.
+#[uniffi::export]
+pub fn message_input_max_utf16() -> u32 { 4000 }
+#[uniffi::export]
+pub fn is_message_text_valid(text: String) -> bool {
+    text.encode_utf16().count() <= message_input_max_utf16() as usize &&
+        crate::recovery::RecoverySubmission::new("validation_topic".into(),
+            crate::recovery::SubmissionKind::Message,
+            serde_json::json!({"requestId":"validation_123","text":text,"attachments":[]})).is_ok()
+}
+
 // Original bytes stay opaque to native UI and debug output.
 struct Message { request_id: String, text: String }
 #[derive(uniffi::Object)]
@@ -16,9 +28,11 @@ pub struct NativeMessageCheck {
     fence: Arc<NativeRecoveryFence>,
     fingerprint: String,
     message: Mutex<Option<Message>>,
+    stamp: crate::pending::StoreStamp,
 }
 #[derive(uniffi::Object)]
 pub struct NativeMessageDispatch {
+    journal: Arc<NativePendingJournal>,
     fence: Arc<NativeRecoveryFence>,
     fingerprint: String,
     plan: Mutex<Option<OutboundSubmission>>,
@@ -58,16 +72,18 @@ impl SessionCredential {
         self.recovery_valid().map_err(|_| NativeSendError::CredentialMismatch)?;
         if self.origin() != journal.origin { return Err(NativeSendError::CredentialMismatch); }
         validate_context(&expected, &topic_key, fence.view_generation, &fence)?;
+        if !is_message_text_valid(text.clone()) { return Err(NativeSendError::InvalidMessage); }
         let wire = crate::recovery::RecoverySubmission::new(topic_key.clone(),
             crate::recovery::SubmissionKind::Message,
             serde_json::json!({"requestId":request_id,"text":text,"attachments":[]}))
             .map_err(|_| NativeSendError::InvalidMessage)?;
         wire.validate_wire_identity().map_err(|_| NativeSendError::InvalidMessage)?;
+        let stamp = journal.store.change_stamp().map_err(|_| NativeSendError::StoreUnavailable)?;
         let current = self.session_info_with_client(client).await.map_err(|_| NativeSendError::SessionUnavailable)?;
         self.recovery_valid().map_err(|_| NativeSendError::CredentialMismatch)?;
         validate_context(&current, &topic_key, fence.view_generation, &fence)?;
         Ok(Arc::new(NativeMessageCheck {
-            journal, fence, fingerprint: self.recovery_fingerprint(),
+            journal, fence, stamp, fingerprint: self.recovery_fingerprint(),
             message: Mutex::new(Some(Message { request_id, text })),
         }))
     }
@@ -77,6 +93,7 @@ impl SessionCredential {
         if dispatch.fingerprint != self.recovery_fingerprint() {
             return Err(NativeSendError::CredentialMismatch);
         }
+        dispatch.journal.verify_location().map_err(|_| NativeSendError::StoreUnavailable)?;
         let plan = {
             let cancelled = dispatch.fence.cancelled.lock().map_err(|_| NativeSendError::Cancelled)?;
             if *cancelled { return Err(NativeSendError::Cancelled); }
@@ -114,9 +131,9 @@ impl SessionCredential {
         let message = check.message.lock().map_err(|_| NativeSendError::AlreadyConsumed)?
             .take().ok_or(NativeSendError::AlreadyConsumed)?;
         // Existing admission and one-use dispatch claim: exactly one source.
-        let plan = journal.claim_original_message(&session, &topic_key, &message.request_id, &message.text)?;
+        let plan = journal.claim_original_message_at_stamp(&session, &topic_key, &message.request_id, &message.text, Some(check.stamp))?;
         drop(cancelled);
-        Ok(Arc::new(NativeMessageDispatch { fence: check.fence.clone(),
+        Ok(Arc::new(NativeMessageDispatch { journal: journal.clone(), fence: check.fence.clone(),
             fingerprint: check.fingerprint.clone(), plan: Mutex::new(Some(plan)) }))
     }
 }
@@ -153,7 +170,7 @@ mod tests {
     }
     fn check(journal: &Arc<NativePendingJournal>, credential: &SessionCredential,
         fence: &Arc<NativeRecoveryFence>) -> Arc<NativeMessageCheck> {
-        Arc::new(NativeMessageCheck { journal: journal.clone(), fence: fence.clone(),
+        Arc::new(NativeMessageCheck { journal: journal.clone(), fence: fence.clone(), stamp: journal.store.change_stamp().unwrap(),
             fingerprint: credential.recovery_fingerprint(),
             message: Mutex::new(Some(Message { request_id: "request_123".into(), text: "synthetic".into() })) })
     }

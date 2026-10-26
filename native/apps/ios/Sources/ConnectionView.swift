@@ -30,6 +30,59 @@ import Foundation
     private var recoveryFence: NativeRecoveryFence?
     private var recoveryTask: Task<Void, Never>?
 
+    @Published var draftText = ""
+    @Published var sendStatus = "SEND_IDLE"
+    @Published var sendReviewRequired = false
+    @Published var sendActive = false
+    private var sendFence: NativeRecoveryFence?
+    private var sendTask: Task<Void, Never>?
+    var confirmationGeneration: UInt64 { viewGeneration }
+    var validDraft: Bool { isMessageTextValid(text: draftText) }
+    func cancelSend() {
+        guard let fence = sendFence else { return }
+        fence.cancel()
+        sendFence = nil; sendTask?.cancel(); sendTask = nil
+        viewGeneration &+= 1; sendActive = false; busy = false
+        sendStatus = "SEND_CANCELLED_REVIEW_PENDING"
+    }
+    /// Shared composer, one protected capability pipeline; no second sender.
+    func sendMessage() {
+        guard !busy, !sendReviewRequired, validDraft, status == "SESSION_READY",
+              let expected = session, let topic = selectedTopic, topics.contains(topic) else { return }
+        let message = draftText
+        let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generation = viewGeneration
+        let fence: NativeRecoveryFence
+        do { fence = try NativeRecoveryFence(expected: expected, topicKey: topic, viewGeneration: generation) }
+        catch { sendStatus = "SEND_CONTEXT_REJECTED"; return }
+        let requestId = UUID().uuidString
+        sendFence = fence; sendActive = true; busy = true
+        sendReviewRequired = true; sendStatus = "SEND_CLAIMING_ONCE"
+        sendTask = Task {
+            defer {
+                if sendFence === fence {
+                    sendFence = nil; sendTask = nil; sendActive = false
+                    if generation == viewGeneration { busy = false }
+                }
+            }
+            do {
+                let result = try await vault.sendOriginalMessageOnce(target, expected: expected,
+                    topicKey: topic, requestId: requestId, text: message, generation: generation, fence: fence)
+                try Task.checkCancellation()
+                guard sendFence === fence, generation == viewGeneration,
+                      target == origin.trimmingCharacters(in: .whitespacesAndNewlines), selectedTopic == topic,
+                      session?.entryId == expected.entryId, session?.sessionMarker == expected.sessionMarker else { return }
+                draftText = ""; sendStatus = result.disposition
+                pendingRows = []; pendingStatus = "PENDING_REVIEW_REQUIRED"
+            } catch {
+                if sendFence === fence, generation == viewGeneration {
+                    sendStatus = "SEND_UNCERTAIN_REVIEW_PENDING"
+                    pendingStatus = "PENDING_REVIEW_REQUIRED"
+                }
+            }
+        }
+    }
+
     func cancelRecovery() {
         guard let fence = recoveryFence else { return }
         fence.cancel() // Synchronous barrier before changing view or Topic.
@@ -58,6 +111,11 @@ import Foundation
                 guard recoveryFence === fence, generation == viewGeneration,
                       target == origin.trimmingCharacters(in: .whitespacesAndNewlines), selectedTopic == topic,
                       session?.entryId == expected.entryId, session?.sessionMarker == expected.sessionMarker else { return }
+                if result == nil {
+                    sendReviewRequired = false; pendingRows = []; pendingStatus = "PENDING_EMPTY"
+                } else if case .some(.accepted(_, _)) = result {
+                    sendReviewRequired = false; pendingRows = []; pendingStatus = "PENDING_EMPTY"
+                }
                 switch result {
                 case .none: recoveryStatus = "NO_PENDING_ORIGINAL"
                 case .some(.accepted(_, let state)): recoveryStatus = "REQUEST_ACCEPTED · \(state.prefix(80)) · 非AA完成证明"
@@ -86,6 +144,7 @@ import Foundation
     /// Ephemeral view-only cache. Does not alter protected credentials or pending.
     private func clearHistory(dropSession: Bool = true) {
         cancelRecovery()
+        cancelSend()
         viewGeneration &+= 1
         if dropSession { session = nil }
         selectedTopic = nil
@@ -93,9 +152,10 @@ import Foundation
         historyStatus = "HISTORY_IDLE"
         pendingRows = []; pendingStatus = "PENDING_IDLE"
         recoveryStatus = "RECOVERY_IDLE"
+        draftText = ""; sendStatus = "SEND_IDLE"; sendReviewRequired = false
     }
     func selectTopic(_ topic: String) {
-        guard (!busy || recoveryActive), status == "SESSION_READY", topics.contains(topic), session != nil else { return }
+        guard (!busy || recoveryActive || sendActive), status == "SESSION_READY", topics.contains(topic), session != nil else { return }
         clearHistory(dropSession: false)
         selectedTopic = topic
         historyStatus = "HISTORY_READY_TO_READ"
@@ -162,6 +222,7 @@ import Foundation
                     pendingStatus = "PENDING_STALE"; return
                 }
                 pendingRows = previews
+                sendReviewRequired = !previews.isEmpty
                 pendingStatus = previews.isEmpty ? "PENDING_EMPTY" : "PENDING_UNKNOWN_REVIEW"
             } catch {
                 if generation == viewGeneration { pendingStatus = "PENDING_FAILED" }
@@ -227,6 +288,7 @@ struct ConnectionView: View {
     @StateObject private var model = ConnectionModel()
     // Ephemeral only: never SceneStorage/AppStorage or a saved-state restoration field.
     @State private var code = ""
+    @State private var confirmingSend = false
     @FocusState private var inputFocused: Bool
     var body: some View {
         NavigationStack {
@@ -256,7 +318,7 @@ struct ConnectionView: View {
                         ForEach(model.topics, id: \.self) { topic in
                             Button(model.selectedTopic == topic ? "✓ \(topic)" : topic) {
                                 model.selectTopic(topic)
-                            }.disabled(model.busy && !model.recoveryActive)
+                            }.disabled(model.busy && !model.recoveryActive && !model.sendActive)
                         }
                     }
                 }
@@ -268,6 +330,20 @@ struct ConnectionView: View {
                         if model.recoveryActive {
                             Button("取消核对") { model.cancelRecovery() }.accessibilityIdentifier("cancelRecovery")
                         }
+                    }
+                    Section("原始消息（仅手动首次发送）") {
+                        TextEditor(text: $model.draftText).frame(minHeight: 90)
+                            .accessibilityIdentifier("messageDraft")
+                            .disabled(model.busy || model.sendReviewRequired)
+                        Button("确认后发送一次") { confirmingSend = true }
+                            .accessibilityIdentifier("sendOriginalMessage")
+                            .disabled(model.busy || model.sendReviewRequired || !model.validDraft)
+                        Text(model.sendStatus).accessibilityIdentifier("sendStatus")
+                        if model.sendActive {
+                            Button("停止本机等待") { model.cancelSend() }.accessibilityIdentifier("cancelSend")
+                        }
+                        Text("新消息最多4000 UTF-16单位；HTTP202不代表AA完成。取消本机等待不会撤回已领取的请求或取消远端任务。")
+                            .font(.caption)
                     }
                     Section("话题历史（只读）") {
                         Text(model.historyStatus).accessibilityIdentifier("historyStatus")
@@ -300,7 +376,16 @@ struct ConnectionView: View {
                     Text("只填写你信任的服务入口。配对码仅用于一次请求；不放入日志、聊天历史或普通设置。")
                         .font(.caption)
                 }
-            }.navigationTitle("连接 VCP").onDisappear { model.cancelRecovery() }
+            }.navigationTitle("连接 VCP")
+                .onDisappear { model.cancelSend(); model.cancelRecovery(); confirmingSend = false }
+                .onChange(of: model.confirmationGeneration) { _, _ in confirmingSend = false }
+                .onChange(of: model.draftText) { _, _ in confirmingSend = false }
+                .confirmationDialog("确认原始消息首次提交", isPresented: $confirmingSend, titleVisibility: .visible) {
+                    Button("确认发送一次") { model.sendMessage() }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("先在本机保存并只提交一次。断网和HTTP202不表示完成；未知状态先核对原回执，不自动重发。")
+                }
         }
     }
 }

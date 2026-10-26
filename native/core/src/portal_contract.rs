@@ -72,11 +72,15 @@ impl PortalSession {
     /// Only local admission. Caller must persist attempted state before HTTP;
     /// no POST, approval or new request identity occurs here.
     pub fn admit(&self, store: &PendingStore, submission: &Submission) -> Result<PendingRecord, PortalError> {
+        self.admit_at_stamp(store, submission, None)
+    }
+    pub(crate) fn admit_at_stamp(&self, store: &PendingStore, submission: &Submission,
+        stamp: Option<crate::pending::StoreStamp>) -> Result<PendingRecord, PortalError> {
         if submission.key.endpoint_id != self.entry_id || submission.key.session_marker != self.session_marker {
             return Err(PortalError::ContextChanged);
         }
         if !self.allows(&submission.topic_id) { return Err(PortalError::TopicNotAllowed); }
-        Ok(store.prepare_topic_exclusive(submission)?)
+        Ok(store.prepare_topic_exclusive_at_stamp(submission, stamp)?)
     }
 }
 

@@ -33,5 +33,7 @@ final class ConnectionUiTests: XCTestCase {
         XCTAssertFalse(app.buttons["readHistory"].exists)
         XCTAssertFalse(app.buttons["inspectPending"].exists)
         XCTAssertFalse(app.buttons["recoverPending"].exists)
+        XCTAssertFalse(app.textViews["messageDraft"].exists)
+        XCTAssertFalse(app.buttons["sendOriginalMessage"].exists)
     }
 }

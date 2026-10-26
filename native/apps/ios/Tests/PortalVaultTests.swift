@@ -11,6 +11,12 @@ final class PortalVaultTests: XCTestCase {
             setCookie: "__Secure-vcp_mobile=\(String(repeating: "A", count: 43)); Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=600")
     }
     private func service() -> String { "org.vcptoolbox.nativeclient.test.\(UUID().uuidString)" }
+    private func scopedVault(_ service: String) -> PortalSessionVault {
+        let namespace = SHA256.hash(data: Data(service.utf8)).map { String(format: "%02x", $0) }.joined()
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return PortalSessionVault(service: service,
+            journalRoot: support.appendingPathComponent("portal-pending-v1").appendingPathComponent(namespace))
+    }
     private func removeService(_ service: String) {
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
         // This helper only receives UUID-scoped synthetic test services.
@@ -22,17 +28,17 @@ final class PortalVaultTests: XCTestCase {
     }
     func testRoundtripAcrossInstancesPreservesExpiry() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         let original = try issued(a)
         try await vault.save(original)
-        let restored = try await PortalSessionVault(service: name).load(a)
+        let restored = try await scopedVault(name).load(a)
         XCTAssertNotNil(restored)
         XCTAssertTrue(try original.secretBytesForVault() == restored!.secretBytesForVault())
         XCTAssertEqual(original.expiresAtMs(), restored!.expiresAtMs())
     }
     func testCanonicalOriginAndPortIsolation() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         try await vault.save(issued(a))
         let restored = try await vault.load("https://A.EXAMPLE.TEST:443")
         XCTAssertNotNil(restored)
@@ -43,7 +49,7 @@ final class PortalVaultTests: XCTestCase {
     }
     func testKeychainAttributesAreDeviceOnlyAndNotSynchronizable() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         try await vault.save(issued(a))
         var item: CFTypeRef?
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
@@ -57,7 +63,7 @@ final class PortalVaultTests: XCTestCase {
     }
     func testCorruptRecordIsRejectedAndRetained() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: name, kSecAttrAccount as String: try credentialStorageKey(origin: a),
             kSecValueData as String: Data("broken synthetic record".utf8),
@@ -76,7 +82,7 @@ final class PortalVaultTests: XCTestCase {
     }
     func testCredentialCannotMoveToAnotherOrigin() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         let original = try issued(a)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: name, kSecAttrAccount as String: try credentialStorageKey(origin: b),
@@ -90,7 +96,7 @@ final class PortalVaultTests: XCTestCase {
     }
     func testRemovalIsScopedAndUnpairedReadNeverRequestsNetwork() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         try await vault.save(issued(a))
         try await vault.save(issued(b))
         try await vault.remove(a)
@@ -104,7 +110,7 @@ final class PortalVaultTests: XCTestCase {
     }
     func testUnpairedHistoryDoesNotUseNetwork() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         let expected = NativeSessionInfo(entryId: String(repeating: "a", count: 64),
             sessionMarker: String(repeating: "b", count: 64), topicKeys: ["topic_a"], selectedTopic: nil)
         do {
@@ -120,7 +126,7 @@ final class PortalVaultTests: XCTestCase {
 
     func testUnpairedRecoveryDoesNotUseNetwork() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service: name)
+        let vault = scopedVault(name)
         let expected = NativeSessionInfo(entryId: String(repeating: "a",count:64),
             sessionMarker:String(repeating:"b",count:64),topicKeys:["topic_a"],selectedTopic:nil)
         let fence = try NativeRecoveryFence(expected:expected,topicKey:"topic_a",viewGeneration:1)
@@ -171,11 +177,13 @@ final class PortalVaultTests: XCTestCase {
         #else
         print("VCP_PROTECTION_PROBE simulator=false")
         #endif
-        let main = directory.appendingPathComponent("pending.sqlite")
+        let selected = try? NativePendingJournal.openScoped(origin: a, privateDirectory: directory.path)
+        guard let selected else { XCTFail("Diagnostic journal rejected"); return }
+        let main = URL(fileURLWithPath: selected.privatePath())
         let before = protectionProbe(main, label: "main.before-extra-open")
         _ = protectionProbe(directory, label: "root")
         do {
-            let held = try NativePendingJournal.open(origin: a, privatePath: main.path)
+            let held = try NativePendingJournal.openScoped(origin: a, privateDirectory: directory.path)
             XCTAssertEqual(try held.pendingForTopic(topicKey: "topic_a"), [expected],
                 "Diagnostic path must read the exact original journal")
             withExtendedLifetime(held) {
@@ -220,22 +228,22 @@ final class PortalVaultTests: XCTestCase {
     }
     func testPendingCheckpointSurvivesReopenCancellationAndCredentialRemoval() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service:name)
+        let vault = scopedVault(name)
         try await vault.save(issued(a))
         let expected = NativeSessionInfo(entryId:String(repeating:"a",count:64),
             sessionMarker:String(repeating:"b",count:64),topicKeys:["topic_a"],selectedTopic:nil)
         let pending = try await vault.checkpointOriginal(a,expected:expected,topic:"topic_a",kind:.message,
             originalJson:"{ \"requestId\":\"native_pending_123\", \"text\":\"synthetic pending\" }")
-        let reopened = PortalSessionVault(service:name)
+        let reopened = scopedVault(name)
         let saved = try await reopened.pendingOriginals(a,topic:"topic_a")
         XCTAssertEqual(saved,[pending])
         let namespace = SHA256.hash(data:Data(name.utf8)).map { String(format:"%02x",$0) }.joined()
         let support = try FileManager.default.url(for:.applicationSupportDirectory,in:.userDomainMask,appropriateFor:nil,create:false)
         let directory = support.appendingPathComponent("portal-pending-v1").appendingPathComponent(namespace)
-            .appendingPathComponent(try credentialStorageKey(origin:a))
         XCTAssertEqual(try directory.resourceValues(forKeys:[.isExcludedFromBackupKey]).isExcludedFromBackup,true)
         diagnosePendingProtection(directory, expected: pending)
-        let attrs = try FileManager.default.attributesOfItem(atPath:directory.appendingPathComponent("pending.sqlite").path)
+        let resolved = try NativePendingJournal.openScoped(origin: a, privateDirectory: directory.path)
+        let attrs = try FileManager.default.attributesOfItem(atPath: resolved.privatePath())
         let protectionValue = attrs[.protectionKey]
         // NSDictionary values need not arrive as the Swift typed wrapper.
         // Normalize the representation, never the required protection class.
@@ -261,11 +269,11 @@ final class PortalVaultTests: XCTestCase {
         try await vault.remove(a)
         let afterRemoval = try await reopened.pendingOriginals(a,topic:"topic_a")
         XCTAssertEqual(afterRemoval,[pending])
-        try FileManager.default.removeItem(at:directory.deletingLastPathComponent())
+        try FileManager.default.removeItem(at:directory)
     }
     func testExpiredRecoveryRetainsCredentialAndPending() async throws {
         let name = service(); defer { removeService(name) }
-        let vault = PortalSessionVault(service:name)
+        let vault = scopedVault(name)
         let credential = try SessionCredential.fromServerCookie(origin:a,responseOrigin:a,
             setCookie:"__Secure-vcp_mobile=\(String(repeating:"B",count:43)); Path=/mobile; HttpOnly; Secure; SameSite=Strict; Max-Age=5")
         try await vault.save(credential)

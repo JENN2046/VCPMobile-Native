@@ -199,16 +199,6 @@ impl SessionCredential {
             topic_keys: session.topic_keys, selected_topic: session.selected_topic,
         })
     }
-    /// Only consumes an already durably claimed original intent. Even when
-    /// transport fails, the caller MUST retain pending and reconcile by GET.
-    /// This is never an implicit retry and returns no body or Cookie.
-    pub(crate) async fn dispatch_claimed_once(
-        &self, plan: crate::submission_flow::OutboundSubmission,
-    ) -> Result<crate::transport_policy::SubmissionHttpOutcome, ()> {
-        self.ensure_valid_at(now_ms().map_err(|_| ())?).map_err(|_| ())?;
-        let client = PortalHttpClient::new(self.cookie.origin().as_str()).map_err(|_| ())?;
-        self.dispatch_claimed_with_client(plan, &client).await
-    }
     pub(crate) async fn dispatch_claimed_with_client(&self,
         plan: crate::submission_flow::OutboundSubmission, client: &PortalHttpClient,
     ) -> Result<crate::transport_policy::SubmissionHttpOutcome, ()> {

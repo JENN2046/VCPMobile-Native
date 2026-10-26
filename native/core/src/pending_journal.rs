@@ -4,7 +4,7 @@
 //! The host must supply its trusted app-private, no-backup directory.
 use crate::pending::{PendingState, PendingStore, StoreError, SubmissionKind};
 use crate::recovery::SubmissionKind as WireKind;
-use crate::submission_flow::{first_attempt, FlowError, OutboundSubmission};
+use crate::submission_flow::{first_attempt_at_stamp, FlowError, OutboundSubmission};
 use serde_json::json;
 use crate::session_credential::{credential_storage_key, NativeSessionInfo, SessionCredential};
 use crate::submission_flow::HttpsOrigin;
@@ -26,6 +26,8 @@ pub enum PendingJournalError {
     ContextChanged,
     #[error("Topic not authorized")]
     TopicUnauthorized,
+    #[error("multiple pending layouts; preserve all originals for review")]
+    MultipleStores,
 }
 
 /// Non-secret recovery identifiers only; original message bytes are never returned.
@@ -42,7 +44,7 @@ pub enum NativeSendError {
     CredentialMismatch,
     #[error("authenticated session cannot be verified")]
     SessionUnavailable,
-    #[error("original entry/session changed; no message sent")]
+    #[error("original context or preflight changed; no message sent")]
     ContextChanged,
     #[error("Topic not authorized; no message sent")]
     TopicUnauthorized,
@@ -56,6 +58,8 @@ pub enum NativeSendError {
     Cancelled,
     #[error("send capability already consumed")]
     AlreadyConsumed,
+    #[error("legacy send lacks a protected view capability; use prepare/claim/dispatch")]
+    GuardedSendRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -72,6 +76,8 @@ pub struct NativePendingJournal {
     pub(crate) origin: String,
     storage_key: String,
     pub(crate) store: PendingStore,
+    location: PathBuf,
+    scope_root: Option<PathBuf>,
 }
 
 #[uniffi::export]
@@ -82,9 +88,23 @@ impl NativePendingJournal {
     pub fn new(origin: String, private_directory: String)
         -> Result<Arc<Self>, PendingJournalError>
     {
-        let key = credential_storage_key(origin.clone()).map_err(|_| PendingJournalError::InvalidScope)?;
-        Self::open_private_file(origin, PathBuf::from(private_directory).join(format!("vcp-pending-v1-{key}.sqlite")))
+        Self::open_scoped(origin, private_directory)
     }
+    #[uniffi::constructor]
+    pub fn open_scoped(origin: String, private_directory: String)
+        -> Result<Arc<Self>, PendingJournalError>
+    {
+        let key = credential_storage_key(origin.clone()).map_err(|_| PendingJournalError::InvalidScope)?;
+        let root = PathBuf::from(private_directory);
+        let path = crate::journal_location::resolve(&root, &key)?;
+        let mut result = Self::open_private_file(origin, path)?;
+        Arc::get_mut(&mut result).ok_or(PendingJournalError::StoreUnavailable)?.scope_root = Some(root);
+        Ok(result)
+    }
+    /// Only the protected OS vault uses this resolved path for file attributes;
+    /// never display it or use it to choose a second database.
+    pub fn private_path(&self) -> String { self.location.to_string_lossy().into_owned() }
+
 }
 
 impl NativePendingJournal {
@@ -113,7 +133,7 @@ impl NativePendingJournal {
         }
         let store = PendingStore::open(&location)
             .map_err(|_| PendingJournalError::StoreUnavailable)?;
-        Ok(Arc::new(Self { origin: canonical.as_str().to_owned(), storage_key, store }))
+        Ok(Arc::new(Self { origin: canonical.as_str().to_owned(), storage_key, store, location, scope_root: None }))
     }
 
 }
@@ -143,12 +163,8 @@ impl NativePendingJournal {
         self.previews_for_topic(&current, &topic_key)
     }
 
-    /// Explicit user-only initial send. No automatic retry, ever. A valid
-    /// preflight is necessary but never treated as authority after a change:
-    /// server guards still validate the original entry/session during POST.
-    /// The host must fence credential epoch and selected Topic before calling.
-    /// Once locally claimed, *all* transport outcomes retain pending until an
-    /// authenticated, uniquely matching original receipt is inspected.
+    /// Legacy ABI retained as an explicit refusal. Protected hosts use the
+    /// single prepare/claim/dispatch capability path under their vault gate.
     pub async fn send_original_message_once(
         &self,
         credential: Arc<SessionCredential>,
@@ -157,41 +173,40 @@ impl NativePendingJournal {
         request_id: String,
         text: String,
     ) -> Result<NativeFirstSendResult, NativeSendError> {
-        if credential.storage_key().map_err(|_| NativeSendError::CredentialMismatch)?
-            != self.storage_key {
-            return Err(NativeSendError::CredentialMismatch);
-        }
-        let expected_session = crate::session_credential::history_preflight(
-            &self.origin, &expected, &topic_key, 0,
-        ).map_err(|_| NativeSendError::TopicUnauthorized)?;
-        let current = credential.fetch_session_info().await
-            .map_err(|_| NativeSendError::SessionUnavailable)?;
-        if current.entry_id != expected_session.entry_id ||
-            current.session_marker != expected_session.session_marker {
-            return Err(NativeSendError::ContextChanged);
-        }
-        let verified = crate::session_credential::history_preflight(
-            &self.origin, &current, &topic_key, 0,
-        ).map_err(|_| NativeSendError::TopicUnauthorized)?;
-        // This is the sole durable dispatch claim. Failed claim means NO POST.
-        let plan = self.claim_original_message(&verified, &topic_key, &request_id, &text)?;
-        let outcome = credential.dispatch_claimed_once(plan).await;
-        let disposition = crate::native_send::disposition(outcome);
-        Ok(NativeFirstSendResult { request_id, disposition: disposition.to_owned() })
+        // Preserve the ABI as an explicit refusal, never as another sender.
+        let _ = (credential, expected, topic_key, request_id, text);
+        Err(NativeSendError::GuardedSendRequired)
     }
 }
 
 impl NativePendingJournal {
+    pub(crate) fn verify_location(&self) -> Result<(), PendingJournalError> {
+        if let Some(root) = &self.scope_root {
+            let selected = crate::journal_location::resolve(root, &self.storage_key)?;
+            if selected != self.location { return Err(PendingJournalError::StoreUnavailable); }
+        }
+        let metadata = fs::symlink_metadata(&self.location).map_err(|_| PendingJournalError::StoreUnavailable)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() { return Err(PendingJournalError::StoreUnavailable); }
+        Ok(())
+    }
     /// All payload bytes are persisted locally before claiming any send. A
     /// competing unknown for this entry/Topic prevents creating a new request.
+    #[cfg(test)]
     pub(crate) fn claim_original_message(
         &self, session: &crate::portal_contract::PortalSession,
         topic: &str, request_id: &str, text: &str,
     ) -> Result<OutboundSubmission, NativeSendError> {
+        self.claim_original_message_at_stamp(session, topic, request_id, text, None)
+    }
+    pub(crate) fn claim_original_message_at_stamp(&self, session: &crate::portal_contract::PortalSession,
+        topic: &str, request_id: &str, text: &str, stamp: Option<crate::pending::StoreStamp>,
+    ) -> Result<OutboundSubmission, NativeSendError> {
+        self.verify_location().map_err(|_| NativeSendError::StoreUnavailable)?;
         if !session.allows(topic) { return Err(NativeSendError::TopicUnauthorized); }
+        if !crate::native_send::is_message_text_valid(text.to_owned()) { return Err(NativeSendError::InvalidMessage); }
         let original = json!({"requestId": request_id, "text": text, "attachments": []});
-        first_attempt(&self.origin, session, &self.store, topic,
-            WireKind::Message, &original.to_string()).map_err(|error| match error {
+        first_attempt_at_stamp(&self.origin, session, &self.store, topic,
+            WireKind::Message, &original.to_string(), stamp).map_err(|error| match error {
                 FlowError::ReconcileFirst |
                 FlowError::Store(StoreError::TopicPending) |
                 FlowError::Portal(crate::portal_contract::PortalError::Store(StoreError::TopicPending)) =>
@@ -199,6 +214,8 @@ impl NativePendingJournal {
                 FlowError::InvalidSubmission => NativeSendError::InvalidMessage,
                 FlowError::Portal(crate::portal_contract::PortalError::TopicNotAllowed) |
                 FlowError::TopicNotAllowed => NativeSendError::TopicUnauthorized,
+                FlowError::Store(StoreError::PreflightChanged) |
+                FlowError::Portal(crate::portal_contract::PortalError::Store(StoreError::PreflightChanged)) |
                 FlowError::Portal(crate::portal_contract::PortalError::ContextChanged) |
                 FlowError::EntryChanged => NativeSendError::ContextChanged,
                 _ => NativeSendError::StoreUnavailable,
@@ -208,6 +225,7 @@ impl NativePendingJournal {
     fn previews_for_topic(
         &self, session: &NativeSessionInfo, topic_key: &str,
     ) -> Result<Vec<NativePendingPreview>, PendingJournalError> {
+        self.verify_location()?;
         let verified = super::session_credential::history_preflight(
             &self.origin, session, topic_key, 0,
         ).map_err(|_| PendingJournalError::TopicUnauthorized)?;
@@ -384,3 +402,7 @@ mod tests {
             Err(PendingJournalError::InvalidScope)));
     }
 }
+
+#[cfg(test)]
+#[path = "directed_journal_tests.rs"]
+mod directed_integration_tests;
