@@ -1,7 +1,12 @@
-//! App-private, per-origin read-only pending journal view for native recovery.
-//! This module NEVER dispatches, retries, reconciles, or deletes a request.
+//! App-private per-origin pending journal for native recovery and deliberate first send.
+//! Listing never dispatches. The initial-message API atomically claims once,
+//! then calls the guarded HTTPS POST without retry or pending cleanup.
 //! The host must supply its trusted app-private, no-backup directory.
-use crate::pending::{PendingState, PendingStore, SubmissionKind};
+use crate::pending::{PendingState, PendingStore, StoreError, SubmissionKind};
+use crate::recovery::SubmissionKind as WireKind;
+use crate::submission_flow::{first_attempt, FlowError, OutboundSubmission};
+use crate::transport_policy::SubmissionHttpOutcome;
+use serde_json::json;
 use crate::session_credential::{credential_storage_key, NativeSessionInfo, SessionCredential};
 use crate::submission_flow::HttpsOrigin;
 use std::fs;
@@ -25,6 +30,31 @@ pub enum PendingJournalError {
 }
 
 /// Non-secret recovery identifiers only; original message bytes are never returned.
+/// An HTTP response is never proof that AA completed or that a receipt exists.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeFirstSendResult {
+    pub request_id: String,
+    pub disposition: String,
+}
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum NativeSendError {
+    #[error("credential does not belong to this HTTPS origin")]
+    CredentialMismatch,
+    #[error("authenticated session cannot be verified")]
+    SessionUnavailable,
+    #[error("original entry/session changed; no message sent")]
+    ContextChanged,
+    #[error("Topic not authorized; no message sent")]
+    TopicUnauthorized,
+    #[error("invalid original message or request identity")]
+    InvalidMessage,
+    #[error("another original request is pending; reconcile first")]
+    OutstandingPending,
+    #[error("app-private pending journal unavailable")]
+    StoreUnavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativePendingPreview {
     pub request_id: String,
@@ -100,9 +130,76 @@ impl NativePendingJournal {
         }
         self.previews_for_topic(&current, &topic_key)
     }
+
+    /// Explicit user-only initial send. No automatic retry, ever. A valid
+    /// preflight is necessary but never treated as authority after a change:
+    /// server guards still validate the original entry/session during POST.
+    /// The host must fence credential epoch and selected Topic before calling.
+    /// Once locally claimed, *all* transport outcomes retain pending until an
+    /// authenticated, uniquely matching original receipt is inspected.
+    pub async fn send_original_message_once(
+        &self,
+        credential: Arc<SessionCredential>,
+        expected: NativeSessionInfo,
+        topic_key: String,
+        request_id: String,
+        text: String,
+    ) -> Result<NativeFirstSendResult, NativeSendError> {
+        if credential.storage_key().map_err(|_| NativeSendError::CredentialMismatch)?
+            != self.storage_key {
+            return Err(NativeSendError::CredentialMismatch);
+        }
+        let expected_session = crate::session_credential::history_preflight(
+            &self.origin, &expected, &topic_key, 0,
+        ).map_err(|_| NativeSendError::TopicUnauthorized)?;
+        let current = credential.fetch_session_info().await
+            .map_err(|_| NativeSendError::SessionUnavailable)?;
+        if current.entry_id != expected_session.entry_id ||
+            current.session_marker != expected_session.session_marker {
+            return Err(NativeSendError::ContextChanged);
+        }
+        let verified = crate::session_credential::history_preflight(
+            &self.origin, &current, &topic_key, 0,
+        ).map_err(|_| NativeSendError::TopicUnauthorized)?;
+        // This is the sole durable dispatch claim. Failed claim means NO POST.
+        let plan = self.claim_original_message(&verified, &topic_key, &request_id, &text)?;
+        let outcome = credential.dispatch_claimed_once(plan).await;
+        let disposition = match outcome {
+            Ok(SubmissionHttpOutcome::AcceptedButUnverified) => "HTTP_202_UNVERIFIED",
+            Ok(SubmissionHttpOutcome::SubmissionContextChanged) => "CONTEXT_CHANGED_KEEP_PENDING",
+            Ok(SubmissionHttpOutcome::AuthenticationRequired) => "AUTH_REQUIRED_KEEP_PENDING",
+            Ok(SubmissionHttpOutcome::Forbidden) => "FORBIDDEN_KEEP_PENDING",
+            Ok(SubmissionHttpOutcome::RedirectDenied) => "REDIRECT_REJECTED_KEEP_PENDING",
+            Ok(SubmissionHttpOutcome::UnknownKeepPending) | Err(()) => "UNKNOWN_KEEP_PENDING",
+        };
+        Ok(NativeFirstSendResult { request_id, disposition: disposition.to_owned() })
+    }
 }
 
 impl NativePendingJournal {
+    /// All payload bytes are persisted locally before claiming any send. A
+    /// competing unknown for this entry/Topic prevents creating a new request.
+    fn claim_original_message(
+        &self, session: &crate::portal_contract::PortalSession,
+        topic: &str, request_id: &str, text: &str,
+    ) -> Result<OutboundSubmission, NativeSendError> {
+        if !session.allows(topic) { return Err(NativeSendError::TopicUnauthorized); }
+        let original = json!({"requestId": request_id, "text": text, "attachments": []});
+        first_attempt(&self.origin, session, &self.store, topic,
+            WireKind::Message, &original.to_string()).map_err(|error| match error {
+                FlowError::ReconcileFirst |
+                FlowError::Store(StoreError::TopicPending) |
+                FlowError::Portal(crate::portal_contract::PortalError::Store(StoreError::TopicPending)) =>
+                    NativeSendError::OutstandingPending,
+                FlowError::InvalidSubmission => NativeSendError::InvalidMessage,
+                FlowError::Portal(crate::portal_contract::PortalError::TopicNotAllowed) |
+                FlowError::TopicNotAllowed => NativeSendError::TopicUnauthorized,
+                FlowError::Portal(crate::portal_contract::PortalError::ContextChanged) |
+                FlowError::EntryChanged => NativeSendError::ContextChanged,
+                _ => NativeSendError::StoreUnavailable,
+            })
+    }
+
     fn previews_for_topic(
         &self, session: &NativeSessionInfo, topic_key: &str,
     ) -> Result<Vec<NativePendingPreview>, PendingJournalError> {
@@ -226,6 +323,49 @@ mod tests {
             ORIGIN.into(), temp.path().to_str().unwrap().into()),
             Err(PendingJournalError::StoreUnavailable)));
         assert_eq!(std::fs::read(&file).unwrap(), previous);
+    }
+
+    #[test]
+    fn first_send_claim_is_durable_once_only_and_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = journal(temp.path());
+        let current = session('b');
+        let verified = crate::session_credential::history_preflight(
+            ORIGIN, &current, "topic_a", 0).unwrap();
+        let plan = local.claim_original_message(
+            &verified, "topic_a", "request_123", "synthetic payload private 🧭").unwrap();
+        assert_eq!(plan.request_id(), "request_123");
+        assert!(plan.original_body().contains("synthetic payload private"));
+        assert!(!format!("{plan:?}").contains("synthetic payload private"));
+        let row = local.store.list().unwrap().pop().unwrap();
+        assert_eq!(row.state, PendingState::AwaitingConfirmation);
+        assert_eq!(row.submission.key.session_marker, verified.session_marker);
+        assert_eq!(local.previews_for_topic(&current, "topic_a").unwrap().len(), 1);
+        assert!(matches!(local.claim_original_message(
+            &verified, "topic_a", "request_123", "synthetic payload private 🧭"),
+            Err(NativeSendError::OutstandingPending)));
+        assert!(matches!(local.claim_original_message(
+            &verified, "topic_a", "request_456", "different"),
+            Err(NativeSendError::OutstandingPending)));
+        drop(local);
+        assert_eq!(journal(temp.path()).store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_message_and_changed_session_cannot_create_an_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = journal(temp.path());
+        let verified = crate::session_credential::history_preflight(
+            ORIGIN, &session('b'), "topic_a", 0).unwrap();
+        for (id, text) in [("too", "hello"), ("request_123", "  "),
+            ("request_123", "") ] {
+            assert!(matches!(journal.claim_original_message(&verified,
+                "topic_a", id, text), Err(NativeSendError::InvalidMessage)));
+        }
+        assert!(matches!(journal.claim_original_message(&verified,
+            "topic_unauthorized", "request_123", "hello"),
+            Err(NativeSendError::TopicUnauthorized)));
+        assert!(journal.store.list().unwrap().is_empty());
     }
 
     #[cfg(unix)]

@@ -60,3 +60,13 @@ checks retained. See docs/M2_PENDING_JOURNAL.md.
 Do not mark this candidate accepted until its own Actions jobs/artifacts pass.
 Next implement actual initial message POST with per-origin durable pending
 identity and explicit recovery, then isolated real service/ACK-loss acceptance.
+
+## Native first send seam after 072adcb
+
+Parent `072adcb8fa6e68e4189fddfacad3b79cfdcae57e` / run40337872777
+finished both Android and iOS jobs SUCCESS. This is parent cloud/synthetic
+validation, not the next batch PASS. The next revision adds explicit Rust-only
+initial native message POST composition with durable per-origin claim and
+response categories that retain pending, plus two offline tests; mobile UI
+and actual isolated NativeSync/ACK-loss acceptance are still pending.
+See docs/M2_NATIVE_FIRST_SEND.md.

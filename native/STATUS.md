@@ -47,3 +47,13 @@ remain. See `docs/M2_PENDING_JOURNAL.md`.
 Next verify exact Actions and repair concrete failures; then wire the original
 one-use native submission, epoch-fenced explicit receipt confirmation and
 isolated real NativeSync service acceptance. M3–M5/device/signing pending.
+
+## M2 original initial message dispatch seam (unverified new revision)
+
+A Rust/UniFFI-only, user-invoked `NativePendingJournal.send_original_message_once`
+now composes fresh authorized session GET, original scoped/transactional message
+reservation, atomic first-attempt claim and existing exact guarded HTTPS POST.
+All HTTP results preserve pending; 202 is unverified. Two offline tests added.
+No Android/iOS send UI is wired, no live NativeSync service test exists.
+This candidate requires its own exact Actions Rust/Android/iOS validation.
+See `docs/M2_NATIVE_FIRST_SEND.md`.

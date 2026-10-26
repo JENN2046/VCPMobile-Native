@@ -170,6 +170,16 @@ pub(crate) fn now_ms() -> Result<u64, SessionCredentialError> {
     u64::try_from(value).map_err(|_| SessionCredentialError::ClockInvalid)
 }
 impl SessionCredential {
+    /// Only consumes an already durably claimed original intent. Even when
+    /// transport fails, the caller MUST retain pending and reconcile by GET.
+    /// This is never an implicit retry and returns no body or Cookie.
+    pub(crate) async fn dispatch_claimed_once(
+        &self, plan: crate::submission_flow::OutboundSubmission,
+    ) -> Result<crate::transport_policy::SubmissionHttpOutcome, ()> {
+        self.ensure_valid_at(now_ms().map_err(|_| ())?).map_err(|_| ())?;
+        let client = PortalHttpClient::new(self.cookie.origin().as_str()).map_err(|_| ())?;
+        client.submit_claimed_once(&self.cookie, plan).await.map_err(|_| ())
+    }
     /// Internal TLS adapter entry; conservative expiry begins before the POST.
     pub(crate) fn from_pairing_response(origin: &str, header: &str, started: u64)
         -> Result<Arc<Self>, SessionCredentialError>
