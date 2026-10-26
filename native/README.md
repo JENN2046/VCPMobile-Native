@@ -10,7 +10,7 @@ Independent SwiftUI / Jetpack Compose applications share a Rust client core thro
 - `apps/ios`: SwiftUI/XcodeGen host, generated Swift binding and three simulator UI tests.
 - `tests/kotlin` / `tests/swift`: actual host-to-Rust tests, not replacements for simulator or device tests.
 
-No NativeSync transport is invented. The R2.1 accepted installation/UX source materials were recovered and partially blob-verified (see docs/NATIVESYNC_R21_SOURCE_MAP.md), but no full accepted checkout or real authenticated HTTPS client exists yet. The pending component has no server acceptance or task execution authority.
+NativeSync R2.1 accepted materials were recovered and partially blob-verified (see docs/NATIVESYNC_R21_SOURCE_MAP.md). A scoped HTTPS GET and one-shot POST implementation exists but has not been authenticated against the actual service; no full accepted checkout is claimed. Pending storage has no server acceptance or task execution authority.
 
 ## Build
 
@@ -35,7 +35,7 @@ Read STATUS.md and WORKLOG.md first. Source, host tests, target compilation, app
 
 ## M2 read-only HTTPS candidate
 
-core/src/https_transport.rs implements an actual Rust HTTPS GET /mobile/api/session with a validated server-issued Cookie object and conservative response checks. M1 diagnostic UIs do not invoke it. Keychain/Keystore, pairing, POST and real service tests remain absent. See docs/M2_HTTPS_READ_ONLY.md.
+core/src/https_transport.rs has scoped Rust HTTPS GET /mobile/api/session plus a one-shot POST transport, neither called from diagnostic UI. Android Keystore and iOS Keychain host source now exists, but real pairing, authenticated service testing and hardware acceptance remain absent. See docs/M2_HTTPS_READ_ONLY.md and docs/M2_SESSION_VAULT.md.
 
 
 The next M2 read-only slice adds an authorized raw Topic history GET to `https_transport.rs`, without claiming actual server/device acceptance. The response is deliberately opaque; it cannot clear pending writes or add messages. See `docs/M2_HTTPS_READ_ONLY.md` and live STATUS for test evidence.
@@ -45,4 +45,4 @@ The next M2 read-only slice adds an authorized raw Topic history GET to `https_t
 A new explicitly consumed and source-scoped `PortalHttpClient::submit_claimed_once` sends only a persisted first-attempt plan; its response never clears pending or grants task authority. The diagnostic apps do not invoke POST or hold a real Cookie. See `docs/M2_POST_TRANSPORT.md` and exact CI evidence.
 
 
-**Reproducible dependencies:** `native/Cargo.lock` is committed from the exact successful CI-resolved dependency set; CI scripts fail if missing and build with `--locked`. The platform credential-store candidate remains isolated/unverified until selectively merged onto current POST logic.
+**Reproducible dependencies:** `native/Cargo.lock` is committed from the exact successful CI-resolved dependency set; CI scripts fail if missing and build with `--locked`. Platform vault source has now been selectively added on top of current POST logic. Its new tests need this revision's exact CI before any PASS claim.

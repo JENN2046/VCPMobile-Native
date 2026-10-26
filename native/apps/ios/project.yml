@@ -28,6 +28,15 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.1.0
+  VCPNativeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: Tests
+    dependencies:
+      - target: VCPNative
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
   VCPNativeUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -44,4 +53,5 @@ schemes:
         VCPNative: all
     test:
       targets:
+        - VCPNativeTests
         - VCPNativeUITests

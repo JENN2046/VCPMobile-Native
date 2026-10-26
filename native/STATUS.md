@@ -82,3 +82,11 @@ Verified immediate predecessor ac4b9c5c1980e4e24c35c36354d8f0b0ec2266bf, Actions
 
 ## 2026-10-26: M2 secure-credential Rust bridge candidate (this revision needs own CI)
 Read exact prior HEAD e866b2befba6fc9e72581e452873f41c5270ad1e; GitHub Actions 40268429452 on that HEAD completed SUCCESS (both platform jobs). Preserved the one-shot POST and sensitive Cookie-header changes. Selectively incorporated the previously uncommitted session-vault candidate's Rust module as new `core/src/session_credential.rs`, exported via UniFFI. It provides origin-scoped non-credential storage identifiers, bounded opaque records with original expiry (never TTL refresh), reject-only invalid/cross-origin/revoked/expired states, secret-redacted Debug, and caller-triggered read-only GET /mobile/api/session. Seven new Rust unit tests are included; they are NOT counted passed until this exact revision's CI completes. No Keychain/Keystore host implementation was merged, no credential was stored, and no live HTTPS or production service was touched. The original archive remains privately retained for further selective host integration; M2–M5 remain incomplete.
+
+## 2026-10-26: M2 native platform vault integration candidate (new CI required)
+
+Exact predecessor HEAD `ffa3aad8404d4d243b9cbed7d3b52ff0222b7524`, Actions `40273748588`: both Android and iOS job conclusions SUCCESS. This validates the Rust expiring credential bridge on that SHA; it does **not** cover host vault code in this candidate.
+
+This revision selectively adds the saved candidate's Android Keystore AES-GCM + app-private no-backup AtomicFile storage and iOS device-only, non-synchronizing Keychain actor. Existing one-shot POST, scoped Cookie handling, generated UniFFI bridge and source-backed NativeSync R2.1 behavior are retained. Android gains six independent instrumentation tests in addition to the four existing UI cases; the iOS XcodeGen scheme now includes six Keychain unit tests plus the three existing UI tests. No synthetic tests are counted PASS until their exact revision's jobs and per-method results are read.
+
+These are host-local storage implementations, not an app login screen or real pairing; no production session, Cookie or NativeSync server is contacted by tests. Actual service pairing/ACK-loss, hardware, signing, AA and M3–M5 acceptance remain pending.

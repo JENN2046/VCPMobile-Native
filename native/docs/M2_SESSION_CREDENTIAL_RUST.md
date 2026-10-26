@@ -10,3 +10,7 @@ This is one selectively merged component from the previously saved, uncommitted 
 - Seven Rust tests check round-trip TTL preservation, expiry and clock rollback, origin/port scope, corrupt data, revocation, secret-redaction, and pre-network expiry.
 
 Next: selectively merge the existing private candidate's Android Keystore and iOS Keychain host files on top of the current POST implementation, wire explicit user actions, then test protected storage on each supported simulator/device. Only actual CI results establish compilability. Real NativeSync pairing and cross-device continuity are separate acceptance gates.
+
+## Host stores now added (CI pending)
+
+Android: `apps/android/app/src/main/java/org/vcptoolbox/nativeclient/PortalSessionVault.kt` (Keystore AES-GCM, associated data, noBackup AtomicFile, fixed errors) and six standalone instrumentation cases. iOS: `apps/ios/Sources/PortalSessionVault.swift` (non-synchronizing, device-only Keychain actor) and six XcodeGen unit tests, in addition to pre-existing UI suites. See `M2_SESSION_VAULT.md`. They do not auto-run on launch, do not perform pairing, and do not invoke real VCP endpoints in the synthetic tests. Current revision CI required; no actual platform vault PASS yet.
