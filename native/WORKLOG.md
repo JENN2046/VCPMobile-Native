@@ -37,3 +37,26 @@ A new unverified UI batch builds on it: manual Topic pick/read, 200-row paging v
 ## Authenticated original pending receipt gate candidate after 238f450
 
 Run40309677622 at 238f450: both Android and iOS CI jobs SUCCESS, cloud/synthetic UI evidence only. Built an internal Rust-only authenticated reconciliation composition: checked claimed original pending SQLite row, scoped Cookie session GET, authorized Topic history GET and a second session authority check before applying exact original receipt. Four offline gate tests added; all missing, cross-session absent, ambiguous, malformed or changed-authority outcomes preserve unknown state without POST/retry or task control. See docs/M2_RECEIPT_GATE.md. This candidate has NOT passed its own new CI or actual NativeSync service/ACK-loss acceptance. Next: run accurate CI, then explicit mobile per-origin store/epoch integration and isolated service tests.
+
+
+## M2 native explicit pending inventory candidate (after 60226d)
+
+Parent `60226d76e9d608d7e5e4784373c36f1230a2341f` /
+run40319359924 completed both jobs SUCCESS. Independently read original
+Android evidence archive (74-file source manifest matches its exact commit;
+Rust96/Kotlin4/Android13) and iOS artifact (simulator12/12, 0 fail/skip).
+Synthetic cloud run only; not real NativeSync service or physical device.
+
+This candidate implements origin-scoped durable SQLite journal access and
+read-only native recovery inventory in existing Android/iOS connection views.
+Only deliberate user action starts a fresh authenticated session GET, and
+old credential/view generations refuse late display results. No original
+payload returns to the UI. State remains local UNKNOWN until the separate
+authenticated exact-receipt gate confirms request identity; no POST or
+removal occurs here. Four new Rust offline tests and strengthened unpaired
+UI absence assertions; existing vault/bridge tests, Cargo.lock and TLS
+checks retained. See docs/M2_PENDING_JOURNAL.md.
+
+Do not mark this candidate accepted until its own Actions jobs/artifacts pass.
+Next implement actual initial message POST with per-origin durable pending
+identity and explicit recovery, then isolated real service/ACK-loss acceptance.

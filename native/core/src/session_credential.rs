@@ -140,7 +140,7 @@ impl SessionCredential {
     }
 }
 
-fn history_preflight(origin: &str, expected: &NativeSessionInfo, topic_key: &str, after: u64)
+pub(crate) fn history_preflight(origin: &str, expected: &NativeSessionInfo, topic_key: &str, after: u64)
     -> Result<PortalSession, SessionCredentialError>
 {
     let document = json!({"authenticated":true,

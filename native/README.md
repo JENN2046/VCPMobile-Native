@@ -30,3 +30,13 @@ Read `STATUS.md`, `WORKLOG.md`, Issue #1 and the latest exact Actions result. `5
 NativeSync accepted source/patch identities and verified scope are in `docs/NATIVESYNC_R21_SOURCE_MAP.md`. The source ZIPs are available but private and are not published here; partially verified files are not described as a full checkout. `docs/M2_PAIRING.md` explains the actual pairing contract and remaining service acceptance.
 
 The new TLS fixture uses real transport but synthetic protocol responses. Actual NativeSync service pairing, authorized history, message/AA continuation and ACK-loss acceptance remain separate work. Source completion, compilation, simulator, service integration, physical devices and signing are reported separately. Preserve original LICENSE/attribution and failed evidence.
+
+## Explicit local pending inventory (candidate)
+
+Both native Topic screens now offer an explicit, read-only inventory of
+per-origin application-private pending request identities after a fresh
+authorized session GET. It does not submit, retry, confirm receipts,
+or restore old AA authority. The submission UI, exact receipt closure and
+real NativeSync isolated-service acceptance remain next tasks. Evidence and
+privacy boundaries: `docs/M2_PENDING_JOURNAL.md`. This candidate must pass
+its own CI before claiming a platform build result.

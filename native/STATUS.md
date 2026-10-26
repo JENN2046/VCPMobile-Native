@@ -25,3 +25,25 @@ Composed existing secure Cookie HTTPS session and Topic reads with original firs
 Verify exact CI for this new gate, fix real failures, then wire explicit native recovery and isolate an actual NativeSync service. Do not repeat active CI or overwrite concurrent HEAD.
 
 Earlier status entries remain in `docs/history/STATUS_THROUGH_6c6b4c4.md`; early “no source/no vault/no lock” statements are historical, not current.
+
+
+## M2 native pending inventory (new revision, CI not yet verified)
+
+Based on `60226d76e9d608d7e5e4784373c36f1230a2341f` / run40319359924,
+whose two jobs passed (Rust 57+12+14+6+7 = 96, Kotlin 4, Android emulator
+13, iOS simulator 12; zero simulator failures/skips). These are
+cloud/synthetic results for the **parent revision**, not proof of this batch.
+
+Added a per-origin app-private SQLite pending journal and explicitly triggered
+read-only inventory to both native Topic views. It requires a live authenticated
+session GET and the displayed exact entry/session/Topic; platform epoch and
+view generation are checked after the await. UI gets request identity/state
+only, no private payload bytes. No POST, replay, pending deletion, task control,
+background polling or AA-completion inference. Added four offline Rust tests
+and tightened both unpaired UI guards. Existing assertions/locked dependencies
+remain. See `docs/M2_PENDING_JOURNAL.md`.
+
+**This revision has no own Rust/mobile CI PASS yet.** Do not reuse parent results.
+Next verify exact Actions and repair concrete failures; then wire the original
+one-use native submission, epoch-fenced explicit receipt confirmation and
+isolated real NativeSync service acceptance. M3–M5/device/signing pending.

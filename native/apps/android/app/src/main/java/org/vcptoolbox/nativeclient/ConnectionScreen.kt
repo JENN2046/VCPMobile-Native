@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.vcptoolbox.nativecore.NativeHistoryRow
 import org.vcptoolbox.nativecore.NativeSessionInfo
+import org.vcptoolbox.nativecore.NativePendingPreview
 
 /** Only non-secret origin preference is persisted outside the protected vault. */
 internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
@@ -38,6 +39,8 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     var historyCursor by mutableStateOf(0uL); private set
     var historyHasMore by mutableStateOf(false); private set
     var historyStatus by mutableStateOf("HISTORY_IDLE"); private set
+    var pendingRows by mutableStateOf<List<NativePendingPreview>>(emptyList()); private set
+    var pendingStatus by mutableStateOf("PENDING_IDLE"); private set
 
     /** Ephemeral view cache only. Never persist content in preferences or logs. */
     private fun clearHistory(dropSession: Boolean = true) {
@@ -46,6 +49,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
         selectedTopic = null
         historyRows = emptyList(); historyCursor = 0uL; historyHasMore = false
         historyStatus = "HISTORY_IDLE"
+        pendingRows = emptyList(); pendingStatus = "PENDING_IDLE"
     }
 
     fun selectTopic(topic: String) {
@@ -93,6 +97,33 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
                 if (generation == viewGeneration) historyStatus = "HISTORY_FAILED"
+            } finally { busy = false }
+        }
+    }
+
+
+    /** User-triggered, read-only local inventory after live session verification. */
+    fun inspectPending() {
+        if (busy || status != "SESSION_READY") return
+        val expected = session ?: return
+        val topic = selectedTopic ?: return
+        if (topic !in topics) return
+        val target = origin.trim()
+        val generation = viewGeneration
+        busy = true; pendingRows = emptyList(); pendingStatus = "PENDING_LOADING"
+        viewModelScope.launch {
+            try {
+                val previews = vault.listPending(target, expected, topic)
+                if (generation != viewGeneration || target != origin.trim() ||
+                    selectedTopic != topic || session?.entryId != expected.entryId ||
+                    session?.sessionMarker != expected.sessionMarker) {
+                    pendingStatus = "PENDING_STALE"; return@launch
+                }
+                pendingRows = previews
+                pendingStatus = if (previews.isEmpty()) "PENDING_EMPTY" else "PENDING_UNKNOWN_REVIEW"
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (generation == viewGeneration) pendingStatus = "PENDING_FAILED"
             } finally { busy = false }
         }
     }
@@ -205,6 +236,16 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
                     modifier = Modifier.testTag("nextHistoryPage")) { Text("读取下一页") }
             }
             Text("仅内存保留最近400条。任务回执独立核对，不因读取历史而宣布任务完成。",
+                style = MaterialTheme.typography.bodySmall)
+            HorizontalDivider()
+            Text("本机待确认请求（只读）", style = MaterialTheme.typography.titleSmall)
+            OutlinedButton(onClick = model::inspectPending, enabled = !model.busy,
+                modifier = Modifier.testTag("inspectPending")) { Text("核对本机待确认清单") }
+            Text(model.pendingStatus, Modifier.testTag("pendingStatus"))
+            model.pendingRows.forEach { row ->
+                Text("${row.kind} · ${row.state} · ${row.recoveryMode} · ${row.requestId}")
+            }
+            Text("仅显示原请求标识，不显示内容；清单不是服务器收件或AA完成的证明。跨会话只允许查询。",
                 style = MaterialTheme.typography.bodySmall)
         }
         OutlinedButton(onClick = model::removeLocal, enabled = !model.busy,

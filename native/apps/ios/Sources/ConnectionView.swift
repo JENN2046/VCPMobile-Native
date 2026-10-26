@@ -23,6 +23,8 @@ import Foundation
     @Published var historyCursor: UInt64 = 0
     @Published var historyHasMore = false
     @Published var historyStatus = "HISTORY_IDLE"
+    @Published var pendingRows: [NativePendingPreview] = []
+    @Published var pendingStatus = "PENDING_IDLE"
 
     /// Ephemeral view-only cache. Does not alter protected credentials or pending.
     private func clearHistory(dropSession: Bool = true) {
@@ -31,6 +33,7 @@ import Foundation
         selectedTopic = nil
         historyRows = []; historyCursor = 0; historyHasMore = false
         historyStatus = "HISTORY_IDLE"
+        pendingRows = []; pendingStatus = "PENDING_IDLE"
     }
     func selectTopic(_ topic: String) {
         guard !busy, status == "SESSION_READY", topics.contains(topic), session != nil else { return }
@@ -77,6 +80,32 @@ import Foundation
                 // Separate execution projection is not proof of AA completion.
             } catch {
                 if generation == viewGeneration { historyStatus = "HISTORY_FAILED" }
+            }
+        }
+    }
+
+
+    /// Explicit read-only session-checked local inventory, never a recovery POST.
+    func inspectPending() {
+        guard !busy, status == "SESSION_READY", let expected = session,
+              let topic = selectedTopic, topics.contains(topic) else { return }
+        let target = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generation = viewGeneration
+        busy = true; pendingRows = []; pendingStatus = "PENDING_LOADING"
+        Task {
+            defer { busy = false }
+            do {
+                let previews = try await vault.listPending(target, expected: expected, topicKey: topic)
+                guard generation == viewGeneration,
+                      target == origin.trimmingCharacters(in: .whitespacesAndNewlines),
+                      selectedTopic == topic, session?.entryId == expected.entryId,
+                      session?.sessionMarker == expected.sessionMarker else {
+                    pendingStatus = "PENDING_STALE"; return
+                }
+                pendingRows = previews
+                pendingStatus = previews.isEmpty ? "PENDING_EMPTY" : "PENDING_UNKNOWN_REVIEW"
+            } catch {
+                if generation == viewGeneration { pendingStatus = "PENDING_FAILED" }
             }
         }
     }
@@ -185,6 +214,16 @@ struct ConnectionView: View {
                                 .accessibilityIdentifier("nextHistoryPage").disabled(model.busy)
                         }
                         Text("仅内存保留最近400条。任务回执独立核对，不因读取历史而宣布任务完成。")
+                            .font(.caption)
+                        Divider()
+                        Button("核对本机待确认清单") { model.inspectPending() }
+                            .accessibilityIdentifier("inspectPending").disabled(model.busy)
+                        Text(model.pendingStatus).accessibilityIdentifier("pendingStatus")
+                        ForEach(model.pendingRows.indices, id: \.self) { index in
+                            let row = model.pendingRows[index]
+                            Text("\(row.kind) · \(row.state) · \(row.recoveryMode) · \(row.requestId)")
+                        }
+                        Text("仅列原请求标识，不显示内容；清单不是服务端收件或AA完成的证明。跨会话只允许查询。")
                             .font(.caption)
                     }
                 }

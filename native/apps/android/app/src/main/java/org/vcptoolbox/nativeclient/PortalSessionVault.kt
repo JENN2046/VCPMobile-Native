@@ -17,6 +17,8 @@ import org.vcptoolbox.nativecore.PairingAttempt
 import org.vcptoolbox.nativecore.NativeHistoryPage
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.SessionCredential
+import org.vcptoolbox.nativecore.NativePendingJournal
+import org.vcptoolbox.nativecore.NativePendingPreview
 import org.vcptoolbox.nativecore.credentialStorageKey
 
 /** Fixed error categories; do not leak sensitive system error messages. */
@@ -28,6 +30,7 @@ internal class PortalVaultException(val code: String) : Exception("Session vault
  */
 internal class PortalSessionVault(context: Context) {
     private val directory = File(context.applicationContext.noBackupFilesDir, "portal-session-v1")
+    private val pendingDirectory = File(context.applicationContext.noBackupFilesDir, "portal-pending-v1")
     companion object {
         private val gate = Any()
         private val epochs = mutableMapOf<String, Long>()
@@ -208,4 +211,36 @@ internal class PortalSessionVault(context: Context) {
         } finally { snapshot.first.destroy() }
     }
 
+
+    /** Explicit authenticated local recovery inventory. A live session GET is
+     * required, while original payloads never cross into the UI. No POST/cleanup.
+     * The credential epoch is verified AFTER the network call.
+     */
+    suspend fun listPending(origin: String, expected: NativeSessionInfo,
+                            topic: String): List<NativePendingPreview> {
+        val id = keyId(origin)
+        val snapshot = withContext(Dispatchers.IO) {
+            synchronized(gate) {
+                try {
+                    Pair(loadLocked(origin, id) ?: throw PortalVaultException("NOT_PAIRED"),
+                         epochs[id] ?: 0L)
+                } catch (failure: PortalVaultException) { throw failure }
+                catch (_: Exception) { throw PortalVaultException("READ_REJECTED") }
+            }
+        }
+        try {
+            val previews = withContext(Dispatchers.IO) {
+                if (!pendingDirectory.isDirectory && !pendingDirectory.mkdirs()) {
+                    throw PortalVaultException("PENDING_STORE_UNAVAILABLE")
+                }
+                val journal = NativePendingJournal(origin, pendingDirectory.absolutePath)
+                try { journal.listForTopic(snapshot.first, expected, topic) }
+                finally { journal.destroy() }
+            }
+            synchronized(gate) {
+                if ((epochs[id] ?: 0L) != snapshot.second) throw PortalVaultException("SESSION_CHANGED")
+            }
+            return previews
+        } finally { snapshot.first.destroy() }
+    }
 }

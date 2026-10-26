@@ -99,4 +99,26 @@ actor PortalSessionVault {
         return page
     }
 
+
+    /// A deliberate read-only local pending inventory; protected credential is
+    /// checked against a fresh authenticated server Session. No POST or deletion.
+    func listPending(_ origin: String, expected: NativeSessionInfo,
+                     topicKey: String) async throws -> [NativePendingPreview] {
+        let key = try credentialStorageKey(origin: origin)
+        guard let credential = try load(origin) else { throw PortalVaultError.notPaired }
+        let epoch = epochs[key, default: 0]
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = base.appendingPathComponent("portal-pending-v1", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try (directory as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: directory.path)
+        let journal = try NativePendingJournal(origin: origin, privateDirectory: directory.path)
+        let previews = try await journal.listForTopic(
+            credential: credential, expected: expected, topicKey: topicKey)
+        try Task.checkCancellation()
+        guard epochs[key, default: 0] == epoch else { throw PortalVaultError.sessionChanged }
+        return previews
+    }
 }

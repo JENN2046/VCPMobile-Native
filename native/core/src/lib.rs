@@ -19,6 +19,7 @@ pub mod https_transport;
 pub mod session_credential;
 pub mod pairing;
 pub mod history;
+pub mod pending_journal;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum ProbeError {

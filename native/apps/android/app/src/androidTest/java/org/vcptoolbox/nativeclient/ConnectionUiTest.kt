@@ -33,5 +33,6 @@ class ConnectionUiTest {
         awaitStatus("RESTORE_FAILED")
         ui.onNodeWithTag("pairConnection").assertIsEnabled()
         ui.onNodeWithTag("readHistory").assertDoesNotExist()
+        ui.onNodeWithTag("inspectPending").assertDoesNotExist()
     }
 }
