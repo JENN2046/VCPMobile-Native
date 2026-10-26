@@ -1,0 +1,92 @@
+//! Query the original pending receipt over authenticated HTTPS after restart.
+//! No POST, model/tool execution, implicit retry, or remote task control.
+use crate::history::{HistoryError, NativeHistoryPage};
+use crate::https_transport::{PortalHttpClient, PortalHttpError};
+use crate::pending::{PendingStore, RequestKey, StoreError, Submission};
+use crate::submission_flow::{inspect_authenticated_history, FlowError, Reconciliation};
+use crate::transport_policy::PortalCookie;
+use std::fmt;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReceiptQueryError {
+    #[error("pending storage failed: {0}")]
+    Store(#[from] StoreError),
+    #[error("authenticated receipt query failed: {0}")]
+    Http(#[from] PortalHttpError),
+    #[error("history page rejected: {0}")]
+    History(#[from] HistoryError),
+    #[error("original receipt inspection failed: {0}")]
+    Flow(#[from] FlowError),
+}
+
+/// Produced only by a fresh authenticated session + validated history GET.
+/// Querying does not mutate pending. The host must check its credential/view
+/// epoch and credential expiry before committing; discard a late result.
+/// This type is intentionally non-Clone, with no caller-supplied JSON constructor.
+#[must_use = "check the host epoch before committing or discard this query result"]
+pub struct PendingReceiptCheck {
+    original: Submission,
+    outcome: Reconciliation,
+}
+impl fmt::Debug for PendingReceiptCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingReceiptCheck")
+            .field("original_and_outcome", &"[REDACTED]")
+            .finish()
+    }
+}
+impl PendingReceiptCheck {
+    pub fn outcome(&self) -> &Reconciliation {
+        &self.outcome
+    }
+
+    /// Only an exact accepted receipt permits local cleanup. SQLite checks
+    /// the full original again, so a changed/replaced row cannot be removed.
+    /// Accepted identifies the request; a running AA task remains running.
+    pub fn commit(self, store: &PendingStore) -> Result<Reconciliation, ReceiptQueryError> {
+        if matches!(self.outcome, Reconciliation::Accepted { .. })
+            && !store.confirm_verified(&self.original)?
+        {
+            return Err(StoreError::NotFound.into());
+        }
+        Ok(self.outcome)
+    }
+}
+
+impl PortalHttpClient {
+    /// Caller supplies an unexpired Cookie from the protected platform vault.
+    /// Always re-read current server authorization, then query the ORIGINAL
+    /// Topic (never the selected Topic). Executions are unpaginated: one valid
+    /// page at after=0 suffices, even if message history has more pages.
+    /// All failures retain the journal; no retry or cleanup occurs here.
+    pub async fn query_pending_receipt(
+        &self,
+        cookie: &PortalCookie,
+        store: &PendingStore,
+        original_key: &RequestKey,
+    ) -> Result<PendingReceiptCheck, ReceiptQueryError> {
+        let original = store
+            .get(original_key)?
+            .ok_or(StoreError::NotFound)?
+            .submission;
+        let session = self.fetch_session(cookie).await?;
+        if session.entry_id != original.key.endpoint_id {
+            return Err(FlowError::EntryChanged.into());
+        }
+        if !session.allows(&original.topic_id) {
+            return Err(FlowError::TopicNotAllowed.into());
+        }
+        let snapshot = self
+            .fetch_history(cookie, &session, &original.topic_id, 0)
+            .await?;
+        // Validate the complete page before inspecting any apparent receipt.
+        NativeHistoryPage::parse(&snapshot, &session)?;
+        let outcome =
+            inspect_authenticated_history(&session, &original, &snapshot.document["executions"])?;
+        Ok(PendingReceiptCheck { original, outcome })
+    }
+}
+
+#[cfg(test)]
+#[path = "receipt_query_tests.rs"]
+mod tests;

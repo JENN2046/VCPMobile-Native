@@ -161,22 +161,33 @@ pub fn reconcile_authenticated_history(
     original_key: &RequestKey, executions: &Value,
 ) -> Result<Reconciliation, FlowError> {
     let record = store.get(original_key)?.ok_or(StoreError::NotFound)?;
-    if session.entry_id != record.submission.key.endpoint_id { return Err(FlowError::EntryChanged); }
-    if !session.allows(&record.submission.topic_id) { return Err(FlowError::TopicNotAllowed); }
-    let payload: Value = serde_json::from_str(&record.submission.payload_json)
+    let outcome = inspect_authenticated_history(session, &record.submission, executions)?;
+    if matches!(outcome, Reconciliation::Accepted { .. })
+        && !store.confirm_verified(&record.submission)?
+    { return Err(FlowError::Store(StoreError::NotFound)); }
+    Ok(outcome)
+}
+
+/// Inspect without changing the journal. The authenticated adapter retains
+/// the exact original until its caller has checked the credential/view epoch.
+pub(crate) fn inspect_authenticated_history(
+    session: &PortalSession, original: &Submission, executions: &Value,
+) -> Result<Reconciliation, FlowError> {
+    if session.entry_id != original.key.endpoint_id { return Err(FlowError::EntryChanged); }
+    if !session.allows(&original.topic_id) { return Err(FlowError::TopicNotAllowed); }
+    let payload: Value = serde_json::from_str(&original.payload_json)
         .map_err(|_| FlowError::InvalidSubmission)?;
-    let kind = match record.submission.kind { StoredKind::Message => WireKind::Message,
+    let kind = match original.kind { StoredKind::Message => WireKind::Message,
         StoredKind::Invite => WireKind::Invitation };
-    let wire = RecoverySubmission::new(record.submission.topic_id.clone(), kind, payload)
+    let wire = RecoverySubmission::new(original.topic_id.clone(), kind, payload)
         .map_err(|_| FlowError::InvalidSubmission)?;
-    if wire.request_id() != record.submission.key.request_id { return Err(FlowError::InvalidSubmission); }
-    let original = SessionRecovery { entry_id: record.submission.key.endpoint_id.clone(),
-        session_marker: record.submission.key.session_marker.clone() };
+    if wire.request_id() != original.key.request_id { return Err(FlowError::InvalidSubmission); }
+    let original = SessionRecovery { entry_id: original.key.endpoint_id.clone(),
+        session_marker: original.key.session_marker.clone() };
     let context = json!({"version":1,"entryId":session.entry_id,
         "sessionMarker":session.session_marker});
     match wire.inspect(&original, &context, executions) {
         ReceiptInspection::Confirmed { execution_id, execution_state } => {
-            if !store.confirm_verified(&record.submission)? { return Err(FlowError::Store(StoreError::NotFound)); }
             Ok(Reconciliation::Accepted { execution_id, execution_state })
         }
         ReceiptInspection::AbsentSameSession => Ok(Reconciliation::SameSessionNoReceipt),

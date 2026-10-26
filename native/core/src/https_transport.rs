@@ -75,16 +75,29 @@ impl fmt::Debug for PortalHttpClient {
 impl PortalHttpClient {
     pub fn new(origin: &str) -> Result<Self, PortalHttpError> {
         let origin = HttpsOrigin::parse(origin).map_err(|_| PortalHttpError::InvalidOrigin)?;
-        let client = Client::builder()
+        let client = Self::client_builder()
+            .build()
+            .map_err(|_| PortalHttpError::Initialization)?;
+        Ok(Self { origin, client })
+    }
+    fn client_builder() -> reqwest::ClientBuilder {
+        Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .no_proxy()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|_| PortalHttpError::Initialization)?;
-        Ok(Self { origin, client })
+    }
+    /// Test-only trust root and loopback resolution; production TLS policy is
+    /// shared, including certificate/hostname checks and the retry prohibition.
+    #[cfg(test)]
+    pub(crate) fn loopback_for_test(origin: &str, ca: reqwest::Certificate, port: u16) -> Self {
+        let origin = HttpsOrigin::parse(origin).unwrap();
+        let client = Self::client_builder().add_root_certificate(ca)
+            .resolve("recovery.example.test", std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+            .build().unwrap();
+        Self { origin, client }
     }
     pub fn origin(&self) -> &HttpsOrigin { &self.origin }
 
