@@ -1,0 +1,9 @@
+# M2 authenticated pending receipt gate
+
+Rust-only development candidate; does not yet expose UniFFI/mobile UI or verify an actual NativeSync server. Reuses the accepted R2.1 source-based receipt oracle and existing HTTPS/SQLite modules. Nothing here POSTs, retries automatically, cancels AA, or treats 202/any chat message as task completion.
+
+The public Rust method `SessionCredential::reconcile_original_pending` requires an app-private, per-origin PendingStore with an original durably claimed request (AwaitingConfirmation). It first reads the authenticated session, rejects entry/Topic changes, GETs only that Topic history and validates the complete response envelope including its separate unpaginated execution projection. A second session GET refuses an observed session/Topic change, and credential expiration is checked before local mutation. GETs are not an atomic server snapshot.
+
+Only an unambiguous exact original receipt (request ID, Topic, kind, old session marker and payload hash) removes that original SQLite pending row. This is **accepted request identity only**, not AA completion or new cross-session task-control authority. Missing same-session receipts require later explicit decision; missing cross-session, ambiguous, altered, unauthorized, malformed or transport-failed results leave pending intact and do not resend.
+
+Four new Rust offline tests exercise exact cross-session matching, missing receipts, scope/ambiguity refusal and an unclaimed request. The implementation has no current live service, ACK-loss, device, signing or UI acceptance. Next bind an explicit native recovery action with protected credential epoch and scoped store ownership, then verify against an isolated real NativeSync service without paid model execution. Keep existing M3-M5 boundaries.

@@ -319,3 +319,196 @@ mod history_bridge_tests {
         assert!(matches!(c.fetch_history_page(info(),"topic_a".into(),0).await,Err(SessionCredentialError::Expired)));
     }
 }
+
+
+/**
+ * M2 source-backed pending receipt gate. Internal Rust-only until native
+ * hosts provide an explicit recovery action and origin-scoped PendingStore.
+ * This never POSTs, controls AA, or implicitly retries an unknown request.
+ */
+#[derive(Debug, thiserror::Error)]
+pub enum PendingReconcileError {
+    #[error("credential or authenticated GET failed: {0}")]
+    Credential(#[from] SessionCredentialError),
+    #[error("pending store failed: {0}")]
+    Store(#[from] crate::pending::StoreError),
+    #[error("receipt mismatch: {0}")]
+    Flow(#[from] crate::submission_flow::FlowError),
+    #[error("invalid history envelope: {0}")]
+    History(#[from] crate::history::HistoryError),
+    #[error("original request has no durable first-attempt claim")]
+    NotClaimed,
+    #[error("entry, Topic or authenticated session changed")]
+    ContextChanged,
+    #[error("invalid execution projection")]
+    InvalidReceipts,
+}
+impl SessionCredential {
+    /// Requires an app-private store isolated to this credential's origin.
+    /// Performs fresh authenticated session GET, a single authorized Topic
+    /// history GET, and a second session GET before any local confirmation.
+    /// The server does not promise an atomic cross-request snapshot.
+    pub async fn reconcile_original_pending(
+        &self, store: &crate::pending::PendingStore,
+        original_key: &crate::pending::RequestKey,
+    ) -> Result<crate::submission_flow::Reconciliation, PendingReconcileError> {
+        self.ensure_valid_at(now_ms()?)?;
+        let record = store.get(original_key)?
+            .ok_or(crate::pending::StoreError::NotFound)?;
+        if record.state != crate::pending::PendingState::AwaitingConfirmation {
+            return Err(PendingReconcileError::NotClaimed);
+        }
+        let client = PortalHttpClient::new(self.cookie.origin().as_str())
+            .map_err(|_| SessionCredentialError::RequestFailed)?;
+        let first = client.fetch_session(&self.cookie).await.map_err(history_http_error)?;
+        if first.entry_id != record.submission.key.endpoint_id
+            || !first.allows(&record.submission.topic_id)
+        {
+            return Err(PendingReconcileError::ContextChanged);
+        }
+        self.ensure_valid_at(now_ms()?)?;
+        let snapshot = client.fetch_history(
+            &self.cookie, &first, &record.submission.topic_id, 0,
+        ).await.map_err(history_http_error)?;
+        // Explicit second authority read prevents a known stale-session
+        // response from closing pending. It grants no remote task control.
+        let latest = client.fetch_session(&self.cookie).await.map_err(history_http_error)?;
+        if latest.entry_id != first.entry_id
+            || latest.session_marker != first.session_marker
+            || !latest.allows(&record.submission.topic_id)
+        {
+            return Err(PendingReconcileError::ContextChanged);
+        }
+        self.ensure_valid_at(now_ms()?)?;
+        reconcile_verified_page(&latest, store, original_key, &snapshot)
+    }
+}
+
+/// Private final gate: page must originate from an authenticated HTTPS GET.
+/// Tests use synthetic snapshots, not a real NativeSync server.
+fn reconcile_verified_page(
+    session: &PortalSession, store: &crate::pending::PendingStore,
+    original_key: &crate::pending::RequestKey,
+    snapshot: &crate::https_transport::HistorySnapshot,
+) -> Result<crate::submission_flow::Reconciliation, PendingReconcileError> {
+    let record = store.get(original_key)?
+        .ok_or(crate::pending::StoreError::NotFound)?;
+    if record.state != crate::pending::PendingState::AwaitingConfirmation {
+        return Err(PendingReconcileError::NotClaimed);
+    }
+    if record.submission.topic_id != snapshot.topic_key {
+        return Err(PendingReconcileError::ContextChanged);
+    }
+    let page = crate::history::NativeHistoryPage::parse(snapshot, session)?;
+    let executions: Value = serde_json::from_str(&page.executions_json)
+        .map_err(|_| PendingReconcileError::InvalidReceipts)?;
+    Ok(crate::submission_flow::reconcile_authenticated_history(
+        session, store, original_key, &executions,
+    )?)
+}
+
+#[cfg(test)]
+mod pending_reconciliation_tests {
+    use super::*;
+    use crate::pending::{PendingState, PendingStore, RequestKey};
+    use crate::recovery::{RecoverySubmission, SubmissionKind};
+    use crate::submission_flow::{first_attempt, Reconciliation};
+    use serde_json::json;
+
+    const ORIGIN: &str = "https://synthetic.example.test";
+    const ORIGINAL: &str = r#"{ "requestId":"request_123", "text":"synthetic 🧭" }"#;
+
+    fn session(marker: char) -> PortalSession {
+        PortalSession::parse(&json!({"authenticated":true,
+            "recovery":{"version":1,"entryId":"a".repeat(64),
+                "sessionMarker":marker.to_string().repeat(64)},
+            "topics":[{"key":"topic_a"},{"key":"topic_b"}],
+            "selectedTopic":"topic_a"}).to_string()).unwrap()
+    }
+    fn setup() -> (tempfile::TempDir, PendingStore, RequestKey) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PendingStore::open(&dir.path().join("pending.sqlite")).unwrap();
+        drop(first_attempt(ORIGIN, &session('b'), &store,
+            "topic_a", SubmissionKind::Message, ORIGINAL).unwrap());
+        let key = store.list().unwrap()[0].submission.key.clone();
+        (dir, store, key)
+    }
+    fn snapshot(current: &PortalSession, receipts: Value)
+        -> crate::https_transport::HistorySnapshot
+    {
+        crate::https_transport::HistorySnapshot {
+            entry_id:current.entry_id.clone(),
+            session_marker:current.session_marker.clone(),
+            topic_key:"topic_a".into(), after:0,
+            document:json!({"messages":[],"next":0,"hasMore":false,
+                "executions":receipts,
+                "topicState":{"historyReady":true,"executable":true}}),
+        }
+    }
+    fn exact_receipt(original: &PortalSession) -> Value {
+        let wire = RecoverySubmission::new("topic_a".into(), SubmissionKind::Message,
+            serde_json::from_str(ORIGINAL).unwrap()).unwrap();
+        json!({"id":"execution_1","topicKey":"topic_a","requestId":"request_123",
+            "state":"running","recovery":{"version":1,
+                "sessionMarker":original.session_marker,
+                "payloadHash":wire.payload_hash(),"kind":"message"}})
+    }
+    #[test]
+    fn exact_cross_session_receipt_only_confirms_original_identity() {
+        let (_dir,store,key)=setup();
+        let current=session('c');
+        let result=reconcile_verified_page(&current, &store, &key,
+            &snapshot(&current, json!([exact_receipt(&session('b'))]))).unwrap();
+        assert_eq!(result, Reconciliation::Accepted {
+            execution_id:"execution_1".into(),execution_state:"running".into()});
+        assert!(store.list().unwrap().is_empty());
+    }
+    #[test]
+    fn absence_does_not_dispatch_or_remove_original_in_either_session() {
+        let (_dir,store,key)=setup();
+        let old=session('b');let new=session('c');
+        assert_eq!(reconcile_verified_page(&old,&store,&key,&snapshot(&old,json!([]))).unwrap(),
+            Reconciliation::SameSessionNoReceipt);
+        assert!(matches!(reconcile_verified_page(&new,&store,&key,
+            &snapshot(&new,json!([]))).unwrap(), Reconciliation::Review(_)));
+        assert_eq!(store.list().unwrap().len(),1);
+    }
+    #[test]
+    fn wrong_topic_session_or_duplicate_receipts_preserve_unknown() {
+        let (_dir,store,key)=setup();let active=session('b');
+        let mut wrong=snapshot(&active,json!([exact_receipt(&active)]));
+        wrong.topic_key="topic_b".into();
+        assert!(matches!(reconcile_verified_page(&active,&store,&key,&wrong),
+            Err(PendingReconcileError::ContextChanged)));
+        let mut wrong=snapshot(&active,json!([exact_receipt(&active)]));
+        wrong.session_marker="f".repeat(64);
+        assert!(matches!(reconcile_verified_page(&active,&store,&key,&wrong),
+            Err(PendingReconcileError::History(crate::history::HistoryError::ContextChanged))));
+        let receipt=exact_receipt(&active);
+        assert!(matches!(reconcile_verified_page(&active,&store,&key,
+            &snapshot(&active,json!([receipt.clone(),receipt]))).unwrap(),
+            Reconciliation::Review(_)));
+        assert_eq!(store.list().unwrap().len(),1);
+    }
+    #[test]
+    fn prepared_but_not_claimed_request_cannot_be_cleared() {
+        let dir=tempfile::tempdir().unwrap();
+        let store=PendingStore::open(&dir.path().join("pending.sqlite")).unwrap();
+        let active=session('b');
+        let wire=RecoverySubmission::new("topic_a".into(),SubmissionKind::Message,
+            serde_json::from_str(ORIGINAL).unwrap()).unwrap();
+        let request=crate::pending::Submission {
+            key:RequestKey {endpoint_id:active.entry_id.clone(),
+                session_marker:active.session_marker.clone(),
+                request_id:wire.request_id().into()},
+            topic_id:"topic_a".into(),kind:crate::pending::SubmissionKind::Message,
+            payload_json:ORIGINAL.into(),
+        };
+        assert_eq!(store.prepare_topic_exclusive(&request).unwrap().state,
+            PendingState::Prepared);
+        assert!(matches!(reconcile_verified_page(&active,&store,&request.key,
+            &snapshot(&active,json!([exact_receipt(&active)]))),
+            Err(PendingReconcileError::NotClaimed)));
+        assert_eq!(store.list().unwrap().len(),1);
+    }
+}

@@ -4,18 +4,24 @@ Repository: `JENN2046/VCPMobile-Native`; branch: `codex/native-rust-m0-m1`; trac
 
 ## Verified baseline
 
+`238f450f4dbf31d69c2faeec7a2f0a6c900afb7f` / run `40309677622`: Android and iOS jobs SUCCESS, including Rust, Swift/Kotlin bridge and both simulators. This validates the read-only Topic UI cloud batch, not real service or physical devices.
+
 `dce262d03f36802e8c66f99953e9605f8fdeea14` / run `40299726811`: both platform jobs SUCCESS. Rust 92 tests (53+12+14+6+7) and strict clippy passed; Kotlin 4/4; Android instrumentation 13/13; iOS simulator 12/12 with zero failed/skipped/expected failures. The prior `5b65ae6` run40296683389 also passed but is not this batch. Scope remains synthetic TLS, cloud build and simulators, not physical devices or actual VCP service. Original failed runs retained.
 
-## Current read-only Topic history UI batch (not yet verified)
+## Read-only Topic history UI batch (verified on 238f450)
 
 The typed history reader and vault wrappers from `dce262d` have passed their own CI. This new batch attaches them to Android Compose/iOS SwiftUI: explicit Topic selection, manually fetched pages, context/view-generation checks, bounded plain-text previews, tombstones and max 400 in-memory rows. No background polling, disk cache, POST, task control, automatic message replay or AA completion inference. Topic switch, Origin edit, reconnect and local removal purge the view cache. Added unpaired-screen visibility assertions; existing tests and locked dependencies remain.
 
-The new UI has **not** yet completed its own Rust/Android/iOS CI. See `docs/M2_HISTORY_VIEW.md`. No actual NativeSync service pairing/history acceptance or real-device validation is implied.
+The read-only UI passed its own Rust/Android/iOS cloud jobs in run `40309677622` (both SUCCESS). See `docs/M2_HISTORY_VIEW.md`. No actual NativeSync service pairing/history acceptance or real-device validation is implied.
 
 M1 baseline simulator criterion passed. M2 real NativeSync service pairing/history/submission/ACK-loss acceptance is still incomplete. M3–M5, physical phones and distribution signing remain incomplete. No production, main, old repository, real history or credentials modified.
 
+## New Rust pending receipt gate (this revision not yet CI-verified)
+
+Composed existing secure Cookie HTTPS session and Topic reads with original first-attempt SQLite record and exact receipt oracle, requiring a fresh session before and after history GET. Four synthetic gate tests added. No UniFFI/mobile wiring, no actual NativeSync service or ACK-loss acceptance; see `docs/M2_RECEIPT_GATE.md`.
+
 ## Next
 
-Inspect this UI batch's exact CI and repair actual failures. Then implement exact original-pending receipt reconciliation and isolated real-service acceptance, keeping execution receipts separate from history display. Read the source map before changing protocol behavior. Do not repeat active CI or overwrite concurrent HEAD.
+Verify exact CI for this new gate, fix real failures, then wire explicit native recovery and isolate an actual NativeSync service. Do not repeat active CI or overwrite concurrent HEAD.
 
 Earlier status entries remain in `docs/history/STATUS_THROUGH_6c6b4c4.md`; early “no source/no vault/no lock” statements are historical, not current.
