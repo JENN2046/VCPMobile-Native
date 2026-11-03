@@ -9,6 +9,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -25,6 +28,7 @@ import org.vcptoolbox.nativecore.messageInputMaxUtf16
 import org.vcptoolbox.nativecore.isMessageTextValid
 import org.vcptoolbox.nativecore.NativeSendException
 import org.json.JSONObject
+import org.json.JSONArray
 import org.vcptoolbox.nativecore.NativeHistoryRow
 import org.vcptoolbox.nativecore.NativeSessionInfo
 import org.vcptoolbox.nativecore.NativePendingPreview
@@ -32,6 +36,29 @@ import org.vcptoolbox.nativecore.NativeRecoveryFence
 import org.vcptoolbox.nativecore.NativeRecoveryOutcome
 import org.vcptoolbox.nativecore.NativeRecoveryException
 import org.vcptoolbox.nativecore.SessionCredentialException
+
+/** Server execution projection is unpaginated, independently read from
+ * history. Display only bounded status tokens; never parse opaque task bodies.
+ * Malformed/unreasonably large projections are review states, not successes. */
+internal fun executionLabelsFromPage(raw: String): List<String> {
+    if (raw.toByteArray(Charsets.UTF_8).size > NativeExecutionLabels.MAX_JSON_UTF8_BYTES) {
+        return listOf("任务状态快照过大，请在服务端核对")
+    }
+    val records = try { JSONArray(raw) } catch (_: Exception) {
+        return listOf("任务状态快照无效，请在服务端核对")
+    }
+    // Match the iOS projection: every array member must be an object, even
+    // if the visual cap hides it. Invalid data must not silently disappear.
+    for (index in 0 until records.length()) {
+        if (records.optJSONObject(index) == null) {
+            return listOf("任务状态快照无效，请在服务端核对")
+        }
+    }
+    val stateFields = (0 until minOf(records.length(), NativeExecutionLabels.MAX_VISIBLE)).map { index ->
+        records.getJSONObject(index).opt("state") as? String
+    }
+    return NativeExecutionLabels.render(stateFields, records.length())
+}
 
 /** Only non-secret origin preference is persisted outside the protected vault. */
 internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
@@ -49,6 +76,7 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     var historyCursor by mutableStateOf(0uL); private set
     var historyHasMore by mutableStateOf(false); private set
     var historyStatus by mutableStateOf("HISTORY_IDLE"); private set
+    var executionStates by mutableStateOf<List<String>>(emptyList()); private set
     var pendingRows by mutableStateOf<List<NativePendingPreview>>(emptyList()); private set
     var pendingStatus by mutableStateOf("PENDING_IDLE"); private set
     var recoveryStatus by mutableStateOf("RECOVERY_IDLE"); private set
@@ -79,6 +107,8 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
         val generation = viewGeneration
         val fence = try { NativeRecoveryFence(expected, topic, generation.toULong()) }
             catch (_: Exception) { recoveryStatus = "RECOVERY_REJECTED"; return }
+        // An in-flight receipt check cannot serve as an empty-journal clearance.
+        pendingReviewed = false
         recoveryFence = fence; recoveryActive = true; busy = true; recoveryStatus = "RECOVERY_QUERYING"
         recoveryJob = viewModelScope.launch {
             try {
@@ -120,18 +150,75 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
     var replyStatus by mutableStateOf("REPLY_IDLE"); private set
     var chatActive by mutableStateOf(false); private set
     private var unresolvedSend = false
+    // Every new view/session must deliberately verify its local pending journal
+    // against the live authorized session before permitting another original.
+    // This is only a UI gate; the durable Rust SQLite topic admission remains authority.
+    private var pendingReviewed = false
     private var sendingOriginal = false
     private var historyExecutable = false
     private var chatFence: NativeRecoveryFence? = null
     private var chatJob: Job? = null
-    val confirmationGeneration: Long get() = viewGeneration
-    private val inputLimit = messageInputMaxUtf16().toInt()
-    fun updateDraft(value: String) { if (!chatActive && value.length <= inputLimit) draft = value }
+    fun updateDraft(value: String) { if (!busy && !chatActive && value.length <= messageInputMaxUtf16().toInt()) draft = value }
     val canSend: Boolean get() = !busy && status == "SESSION_READY" && selectedTopic != null &&
-        historyExecutable && !historyHasMore && !unresolvedSend && pendingRows.isEmpty() && isMessageTextValid(draft)
+        historyExecutable && !historyHasMore && pendingReviewed &&
+        !unresolvedSend && pendingRows.isEmpty() &&
+        isMessageTextValid(draft)
+    /** Opening a modal is not an enduring grant to send a later draft/topic. */
+    fun prepareSendConfirmation(): NativeSendConfirmation? {
+        if (!canSend) return null
+        val current = session ?: return null
+        return NativeSendConfirmation(origin.trim(), current.entryId, current.sessionMarker,
+            selectedTopic ?: return null, viewGeneration, draft)
+    }
+    fun canConfirmSend(ticket: NativeSendConfirmation?): Boolean = ticket != null && canSend &&
+        ticket.matches(origin.trim(), session?.entryId, session?.sessionMarker,
+            selectedTopic, viewGeneration, draft)
+    fun confirmSend(ticket: NativeSendConfirmation) {
+        if (!canConfirmSend(ticket)) return
+        // Consume the captured view even if preflight later fails before claim.
+        // A subsequent explicit empty-inventory check cannot revive this ticket.
+        viewGeneration++
+        sendMessage()
+    }
+    // Explicit one-shot GETs must not revive send clearance after ON_STOP.
+    // Their network calls are cancellable, and every result is additionally
+    // fenced by viewGeneration in case a transport ignores cancellation.
+    private var historyJob: Job? = null
+    private var pendingInventoryJob: Job? = null
+    private fun cancelLocalReads() {
+        val hadRead = historyJob != null || pendingInventoryJob != null
+        historyJob?.cancel(); historyJob = null
+        pendingInventoryJob?.cancel(); pendingInventoryJob = null
+        if (hadRead) {
+            busy = false
+            pendingStatus = "PENDING_RECHECK_REQUIRED"
+        }
+    }
+    /** App becomes non-visible: stop only local reads and pending queries.
+     * A send may already have claimed its original POST; this is never a retry
+     * or evidence that the server did not receive it. Resume requires explicit
+     * fresh history and authenticated journal checks before another send. */
+    fun suspendForBackground() {
+        // Invalidate every in-flight history/inventory response first.
+        viewGeneration++
+        cancelLocalReads()
+        cancelRecovery()
+        stopChat()
+        pendingReviewed = false
+        historyExecutable = false
+        if (status == "SESSION_READY" && selectedTopic != null) {
+            historyStatus = "HISTORY_RECHECK_REQUIRED"
+        }
+    }
+
     fun stopChat() {
+        // Invalidate even if a cancelled transport returns normally; old finally
+        // blocks cannot clear a new poll or restore old send readiness.
+        if (chatFence != null) viewGeneration++
         chatFence?.cancel()
-        chatJob?.cancel()
+        chatFence = null
+        chatJob?.cancel(); chatJob = null
+        historyExecutable = false
         if (chatActive) {
             if (sendingOriginal) sendStatus = "STOPPED_CHECK_ORIGINAL"
             replyStatus = "RECEIVING_STOPPED"
@@ -161,7 +248,11 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
         val requestId = if (sendText != null) UUID.randomUUID().toString() else null
         chatFence = fence; chatActive = true; busy = true
         sendingOriginal = sendText != null
-        if (sendText != null) { unresolvedSend = true; outgoingText = sendText; draft = ""; sendStatus = "VERIFYING_BEFORE_SEND" }
+        if (sendText != null) {
+            // Consume view's authenticated empty-journal clearance before any await.
+            pendingReviewed = false
+            unresolvedSend = true; outgoingText = sendText; draft = ""; sendStatus = "VERIFYING_BEFORE_SEND"
+        }
         replyStatus = "RECEIVING"
         chatJob = viewModelScope.launch {
             try {
@@ -179,11 +270,15 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                     if (!sameChatView(generation, target, expected, topic)) return@launch
                     if (page.after != after || page.topicKey != topic || page.entryId != expected.entryId ||
                         page.sessionMarker != expected.sessionMarker) throw PortalVaultException("STALE_HISTORY")
-                    historyRows = mergeHistoryWindow(historyRows, page.rows)
+                    val nextRows = mergeHistoryWindow(historyRows, page.rows)
+                    val nextExecutionStates = executionLabelsFromPage(page.executionsJson)
+                    historyRows = nextRows
+                    executionStates = nextExecutionStates
                     historyCursor = page.nextCursor; historyHasMore = page.hasMore
                     historyStatus = if (historyRows.isEmpty()) "HISTORY_EMPTY" else "HISTORY_READY"
-                    historyExecutable = JSONObject(page.topicStateJson).optBoolean("historyReady", false) &&
-                        JSONObject(page.topicStateJson).optBoolean("executable", false)
+                    historyExecutable = NativeTopicSendGuard.allowsSend(
+                        JSONObject(page.topicStateJson).opt("historyReady"),
+                        JSONObject(page.topicStateJson).opt("executable"), page.hasMore)
                     replyStatus = "RECEIVING"
                     delay(if (page.hasMore) 100L else 2000L)
                 }
@@ -192,10 +287,11 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
             catch (error: Exception) {
                 if (sameChatView(generation, target, expected, topic)) {
                     replyStatus = "READ_FAILED_RECONNECT_AND_CHECK_ORIGINAL"
+                    historyExecutable = false // A failed read cannot preserve send readiness.
                     if (sendText != null) sendStatus = when (error) {
                         is NativeSendException.OutstandingPending -> "PENDING_EXISTS_CHECK_ORIGINAL"
                         is NativeSendException.InvalidMessage -> "INVALID_MESSAGE_NOT_SENT"
-                        is NativeSendException.ContextChanged -> "CONTEXT_CHANGED_NOT_SENT"
+                        is NativeSendException.ContextChanged -> "SESSION_CHANGED_NOT_SENT"
                         is NativeSendException.TopicUnauthorized -> "TOPIC_DENIED_NOT_SENT"
                         else -> "UNKNOWN_CHECK_ORIGINAL"
                     }
@@ -213,17 +309,21 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Ephemeral view cache only. Never persist content in preferences or logs. */
     private fun clearHistory(dropSession: Boolean = true) {
+        // Revoke outstanding explicit GETs as well as chat/recovery work.
+        viewGeneration++
+        cancelLocalReads()
         cancelRecovery()
         stopChat()
-        viewGeneration++
         if (dropSession) session = null
         selectedTopic = null
         historyRows = emptyList(); historyCursor = 0uL; historyHasMore = false
+        executionStates = emptyList()
         historyStatus = "HISTORY_IDLE"
         pendingRows = emptyList(); pendingStatus = "PENDING_IDLE"
         recoveryStatus = "RECOVERY_IDLE"
         draft = ""; outgoingText = ""; sendStatus = "SEND_IDLE"; replyStatus = "REPLY_IDLE"
         historyExecutable = false
+        pendingReviewed = false
         unresolvedSend = false; sendingOriginal = false
     }
 
@@ -247,8 +347,8 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
         val target = origin.trim()
         val after = historyCursor
         val generation = viewGeneration
-        busy = true; historyStatus = "HISTORY_LOADING"
-        viewModelScope.launch {
+        busy = true; historyStatus = "HISTORY_LOADING"; historyExecutable = false
+        historyJob = viewModelScope.launch {
             try {
                 val page = vault.fetchHistory(target, expected, topic, after)
                 if (generation != viewGeneration || target != origin.trim() ||
@@ -257,14 +357,22 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
                 if (page.after != after || page.topicKey != topic ||
-                    page.entryId != expected.entryId || page.sessionMarker != expected.sessionMarker ||
-                    page.rows.any { row -> historyRows.any { it.messageId == row.messageId && it.sequence >= row.sequence } }) {
+                    page.entryId != expected.entryId || page.sessionMarker != expected.sessionMarker) {
                     historyStatus = "HISTORY_REJECTED"
                     return@launch
                 }
-                historyRows = mergeHistoryWindow(historyRows, page.rows)
-                historyExecutable = JSONObject(page.topicStateJson).optBoolean("historyReady", false) &&
-                    JSONObject(page.topicStateJson).optBoolean("executable", false)
+                // A newer central revision or tombstone is legitimate; equal or
+                // older sequences remain rejected, without changing pending.
+                val nextRows = try { mergeHistoryWindow(historyRows, page.rows) }
+                    catch (_: IllegalArgumentException) {
+                        historyStatus = "HISTORY_REJECTED"; return@launch
+                    }
+                val nextExecutionStates = executionLabelsFromPage(page.executionsJson)
+                historyRows = nextRows
+                executionStates = nextExecutionStates
+                historyExecutable = NativeTopicSendGuard.allowsSend(
+                        JSONObject(page.topicStateJson).opt("historyReady"),
+                        JSONObject(page.topicStateJson).opt("executable"), page.hasMore)
                 historyCursor = page.nextCursor
                 historyHasMore = page.hasMore
                 historyStatus = if (historyRows.isEmpty()) "HISTORY_EMPTY" else "HISTORY_READY"
@@ -272,8 +380,10 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                 // Pending and AA status remain untouched by this read-only view.
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
-                if (generation == viewGeneration) historyStatus = "HISTORY_FAILED"
-            } finally { busy = false }
+                if (generation == viewGeneration) { historyStatus = "HISTORY_FAILED"; historyExecutable = false }
+            } finally {
+                if (generation == viewGeneration) { busy = false; historyJob = null }
+            }
         }
     }
 
@@ -286,8 +396,9 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
         if (topic !in topics) return
         val target = origin.trim()
         val generation = viewGeneration
+        pendingReviewed = false
         busy = true; pendingRows = emptyList(); pendingStatus = "PENDING_LOADING"
-        viewModelScope.launch {
+        pendingInventoryJob = viewModelScope.launch {
             try {
                 val previews = vault.listPending(target, expected, topic)
                 if (generation != viewGeneration || target != origin.trim() ||
@@ -297,11 +408,17 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 pendingRows = previews
                 unresolvedSend = previews.isNotEmpty()
+                pendingReviewed = previews.isEmpty() // The one successful, authenticated inventory for this view.
                 pendingStatus = if (previews.isEmpty()) "PENDING_EMPTY" else "PENDING_UNKNOWN_REVIEW"
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
-                if (generation == viewGeneration) pendingStatus = "PENDING_FAILED"
-            } finally { busy = false }
+                if (generation == viewGeneration) {
+                    pendingReviewed = false
+                    pendingStatus = "PENDING_FAILED"
+                }
+            } finally {
+                if (generation == viewGeneration) { busy = false; pendingInventoryJob = null }
+            }
         }
     }
 
@@ -369,18 +486,41 @@ internal class ConnectionViewModel(app: Application) : AndroidViewModel(app) {
 
 @Composable
 internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
-    DisposableEffect(model) { onDispose { model.stopChat(); model.cancelRecovery() } }
-    var confirmingSend by remember(model.origin, model.selectedTopic, model.confirmationGeneration, model.draft) { mutableStateOf(false) }
-    if (confirmingSend) AlertDialog(
-        onDismissRequest = { confirmingSend = false },
-        title = { Text("确认原始消息首次提交") },
-        text = { Text("只提交一次并先保存在本机。断网或 HTTP 202 不代表完成；未知提交先核对原回执，不自动重发。") },
-        confirmButton = { TextButton(onClick = { confirmingSend = false; model.sendMessage() },
-            modifier = Modifier.testTag("confirmOriginalSend")) { Text("确认发送一次") } },
-        dismissButton = { TextButton(onClick = { confirmingSend = false }) { Text("取消") } }
-    )
+    // Confirmation must not survive backgrounding: its ticket is scoped to
+    // the foreground view and must be recreated against the current session.
+    var confirmation by remember { mutableStateOf<NativeSendConfirmation?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(model, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                confirmation = null
+                model.suspendForBackground()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            model.suspendForBackground()
+        }
+    }
     // Not rememberSaveable: pairing codes must never enter saved instance state.
     var code by remember { mutableStateOf("") }
+    if (confirmation != null) AlertDialog(
+        onDismissRequest = { confirmation = null },
+        title = { Text("确认原始消息首次提交") },
+        text = { Text("只发送一次。网络失败或 HTTP 202 均不是完成证明；未知请求须先核对原回执，不能换 ID 盲目重发。") },
+        confirmButton = {
+            TextButton(onClick = {
+                val captured = confirmation
+                confirmation = null // The ticket is consumed even on failure.
+                if (captured != null) model.confirmSend(captured)
+            }, enabled = model.canConfirmSend(confirmation),
+                modifier = Modifier.testTag("confirmOriginalSend")) {
+                Text("确认发送一次")
+            }
+        },
+        dismissButton = { TextButton(onClick = { confirmation = null }) { Text("取消") } }
+    )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("连接 VCP", style = MaterialTheme.typography.headlineMedium)
@@ -419,9 +559,11 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
                     modifier = Modifier.testTag("cancelRecovery")) { Text("取消核对") }
             }
             Text("消息", style = MaterialTheme.typography.titleMedium)
+            Text("首次发送前必须主动核对本机待确认清单；无未确认记录且话题历史就绪后方可发送。",
+                style = MaterialTheme.typography.bodySmall)
             OutlinedTextField(model.draft, model::updateDraft, enabled = !model.busy,
                 label = { Text("消息内容") }, modifier = Modifier.fillMaxWidth().testTag("messageDraft"))
-            Button(onClick = { confirmingSend = true }, enabled = model.canSend,
+            Button(onClick = { confirmation = model.prepareSendConfirmation() }, enabled = model.canSend,
                 modifier = Modifier.testTag("sendMessage")) { Text("确认后发送并查看回复") }
             Text(model.sendStatus, Modifier.testTag("sendStatus"))
             if (model.outgoingText.isNotEmpty()) Text("本次原消息：${model.outgoingText}")
@@ -434,6 +576,10 @@ internal fun ConnectionScreen(model: ConnectionViewModel = viewModel()) {
                 style = MaterialTheme.typography.bodySmall)
             Text("话题历史（只读）", style = MaterialTheme.typography.titleMedium)
             Text(model.historyStatus, Modifier.testTag("historyStatus"))
+            Text("服务端任务状态快照（只读）", style = MaterialTheme.typography.titleSmall)
+            model.executionStates.forEach { state -> Text(state) }
+            Text("只显示服务端状态字段，不显示任务内容；不证明原始发送已确认或 AA 整体完成。",
+                style = MaterialTheme.typography.bodySmall)
             OutlinedButton(onClick = { model.readHistory(restart = true) }, enabled = !model.busy,
                 modifier = Modifier.testTag("readHistory")) { Text("从头读取历史") }
             model.historyRows.forEach { row ->

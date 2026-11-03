@@ -24,6 +24,11 @@ class HistoryWindowTest {
             mergeHistoryWindow(listOf(row(9)), listOf(row(9)))
         }
     }
+    @Test fun duplicateIdsWithinOnePageAreRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            mergeHistoryWindow(emptyList(), listOf(row(1), row(2)))
+        }
+    }
     @Test fun boundedWindowPreservesSequenceWithoutDroppingTheLatestRevision() {
         val rows = mergeHistoryWindow(emptyList(), (1..500).map { row(it, "m_$it") })
         assertEquals(400, rows.size)

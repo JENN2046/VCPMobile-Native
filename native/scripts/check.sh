@@ -2,6 +2,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p target/evidence
+# Reject duplicate mobile-host send/journal routes before generating bindings.
+python3 scripts/check_single_send_route.py
+python3 scripts/check_lifecycle_read_fence.py
+python3 scripts/check_pending_review_reauth.py
+python3 scripts/check_native_test_discovery.py
+# Offline negative/positive tests for the Android JUnit artifact gate.
+python3 scripts/test_verify_android_jvm_tests.py
 rustc --version
 cargo --version
 # Compatible with macOS Bash 3.2: avoid empty arrays under nounset.

@@ -18,4 +18,8 @@ for entry in aarch64-linux-android:arm64-v8a:aarch64-linux-android x86_64-linux-
   mkdir -p "generated/android/jniLibs/$abi"
   cp "target/$target/release/libvcp_mobile_native.so" "generated/android/jniLibs/$abi/"
 done
-gradle -p apps/android --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
+# Run Kotlin JVM source-level regressions as well as the Android instrumented suite.
+# Gradle JUnit failures must fail the build; no -x test or ignoreFailures.
+gradle -p apps/android --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+# A Gradle SUCCESS without the exact JUnit XML for every Kotlin @Test is a failure.
+python3 scripts/verify_android_jvm_tests.py

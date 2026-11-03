@@ -31,6 +31,9 @@ tests=(
   PortalVaultTest#expiredRecoveryRetainsCredentialAndPending
   ConnectionUiTest#invalidPairingIsLocalAndClearsCode
   ConnectionUiTest#unpairedRestoreDoesNotStartPairing
+  ExecutionStatesTest#onlyStateIsProjectedWithoutExecutionBodies
+  ExecutionStatesTest#malformedMixedAndOversizedStatesFailClosed
+  ExecutionStatesTest#stateProjectionIsVisuallyBounded
 )
 for method in "${tests[@]}"; do
   output="target/evidence/android-${method}.txt"
@@ -51,4 +54,4 @@ for method in "${tests[@]}"; do
   fi
   printf 'PASS %s\n' "$method" | tee -a "$report"
 done
-printf 'PASS all four bridge UI, ten vault/recovery guards and two connection UI test methods\n' | tee -a "$report"
+printf 'PASS all four bridge UI, ten vault/recovery guards, two connection UI and three state projection tests\n' | tee -a "$report"
